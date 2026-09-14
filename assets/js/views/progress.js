@@ -1,215 +1,316 @@
 /* ============================================================
-   progress.js — 團員進度紀錄（接駁現有系統）
+   progress.js — 進度紀錄系統接駁
+   三種入法：
+     1) Portal 信任模式（推薦）：唔使喺對面開帳號、唔使帶密碼
+        ?u=0082&role=exec_committee&ymis=…&name=…&from=portal&embed=1
+     2) 專用帳戶模式：喺對面系統開一個執委帳戶，呢度幫你自動填入
+     3) 只開連結：最保守，自己登入
    ============================================================ */
 
-import { load, commit } from '../lib/store.js';
-import { esc, icon, modal, toast, qrSvg, copyText, avatar } from '../lib/util.js';
-import { memberName, attendanceStats, members } from '../lib/model.js';
-import { can, current, ROLES, currentRole } from '../lib/auth.js';
+import { load, commit, collection, setSetting } from '../lib/store.js';
+import { profile, settings, members, memberName } from '../lib/model.js';
+import { esc, icon, modal, toast, copyText, qrSvg, downloadSvgEl } from '../lib/util.js';
+import { downloadQrSvg } from '../lib/exporter.js';
+import { go } from '../lib/router.js';
+import { can, current, displayName } from '../lib/auth.js';
+import { pageHead, noteBox, kv } from './ui.js';
+
+let showEmbed = false;
 
 export function title() { return '進度紀錄'; }
 
-export function render() {
+function cfg() {
+  const p = profile();
   const db = load();
-  const url = db.settings.progressUrl || '';
-  const name = db.settings.progressName || '團員進度紀錄系統';
-  const role = ROLES[currentRole()] || ROLES.exco;
+  return {
+    url: p.progress?.url || db.settings.progressUrl || '',
+    name: p.progress?.name || '團員進度紀錄系統',
+    mode: p.progress?.mode || 'portal',
+    portal: p.progress?.portal || { unitParam: db.unitCode, role: 'exec_committee', ymis: '', extraParams: 'embed=1' },
+    dedicated: p.progress?.dedicated || { username: '', password: '' },
+    paramUser: p.progress?.paramUser || 'ymis',
+    paramPass: p.progress?.paramPass || 'p'
+  };
+}
+
+function buildUrl(c) {
+  if (!c.url) return '';
+  const qs = new URLSearchParams();
+  if (c.mode === 'portal') {
+    const p = c.portal || {};
+    if (p.unitParam) qs.set('u', p.unitParam);
+    if (p.role) qs.set('role', p.role);
+    if (p.ymis) qs.set('ymis', p.ymis);
+    qs.set('name', (p.name || '執委會').trim());
+    qs.set('from', 'portal');
+    (String(p.extraParams || '').split('&').filter(Boolean)).forEach(kv => {
+      const [k, v = '1'] = kv.split('=');
+      qs.set(k.trim(), v);
+    });
+  } else if (c.mode === 'dedicated') {
+    const d = c.dedicated || {};
+    if (d.username) qs.set(c.paramUser, d.username);
+    if (d.password) qs.set(c.paramPass, d.password);
+  }
+  const sep = c.url.includes('?') ? '&' : '?';
+  return qs.toString() ? c.url + sep + qs.toString() : c.url;
+}
+
+export function render() {
+  const c = cfg();
+  const url = c.url;
+  const launch = buildUrl(c);
+  const role = c.portal?.role || 'exec_committee';
 
   return `
-  <div class="page-head">
-    <div>
-      <div class="page-title">團員進度紀錄</div>
-      <div class="page-sub">獎章、訓練、評核 —— 由現有系統管理，呢度係入口</div>
-    </div>
-    <div class="row gap-8 no-print">
-      ${url && can('progress.config') ? `<button class="btn" data-act="config">${icon('settings', 16)} 設定</button>` : ''}
-      ${url ? `<button class="btn btn-primary" data-act="open">${icon('external', 16)} 開啟進度系統</button>` : ''}
-    </div>
-  </div>
+  ${pageHead({
+    title: '進度紀錄系統',
+    sub: url ? `${c.name} · 已接駁` : '未接駁 —— 填入進度系統網址即完成',
+    actions: `
+      ${url ? `<button class="btn btn-sm btn-primary" data-act="open">${icon('external', 15)} 開啟（${c.mode === 'portal' ? 'Portal 身份' : c.mode === 'dedicated' ? '自動登入' : '連結'}）</button>` : ''}
+      ${can('progress.config') ? `<button class="btn btn-sm" data-act="config">${icon('settings', 15)} 設定</button>` : ''}`
+  })}
 
-  ${url ? connectedView(url, name, role) : setupView()}
-
-  <div class="grid g-2 mt-16">
-    <div class="card">
-      <div class="card-head"><div class="card-title">呢度睇到咩</div>
-        <div class="card-sub">本系統保留嘅進度相關資料</div></div>
-      <div style="padding:6px 0 6px">
-        ${members().filter(m => m.status === 'active').slice(0, 6).map(m => {
-          const s = attendanceStats(m.id);
-          return `<div class="row gap-12" style="padding:10px 16px;border-bottom:1px solid var(--line-2)">
-            ${avatar(m.name, 'avatar-sm')}
-            <div class="grow"><div class="sm semibold">${esc(m.name)}</div>
-              <div class="xs faint">${esc(m.role)}</div></div>
-            <div class="right" style="min-width:96px">
-              <div class="sm mono" style="color:${s.rate >= 80 ? 'var(--ok)' : s.rate >= 50 ? 'var(--warn)' : 'var(--danger)'}">出席 ${s.rate}%</div>
-              <div class="bar mt-4 ${s.rate >= 80 ? '' : s.rate >= 50 ? 'warn' : 'danger'}"><span style="width:${s.rate}%"></span></div>
+  ${!url ? noteBox('尚未接駁。按右上角「設定」填你嘅進度系統網址（例如你嗰個 Google Apps Script 連結）就得。') : `
+  <div class="grid g-2-1">
+    <div class="col gap-16">
+      <div class="card">
+        <div class="card-head">
+          <div class="row gap-10">
+            <div class="stat-ic" style="background:var(--ok-bg);color:var(--ok)">${icon('check', 18)}</div>
+            <div><div class="card-title">${esc(c.name)}</div>
+              <div class="card-sub mono" style="word-break:break-all">${esc(c.url)}</div></div>
+          </div>
+          <span class="badge b-ok"><span class="dot"></span>已接駁</span>
+        </div>
+        <div style="padding:20px">
+          <div class="grid g-2" style="align-items:start">
+            <div>
+              <div class="seg mb-12">
+                ${[['portal', 'Portal 信任模式'], ['dedicated', '專用帳戶'], ['link', '只開連結']].map(([k, l]) =>
+                  `<button data-mode="${k}" aria-selected="${c.mode === k}" ${can('progress.config') ? '' : 'disabled'}>${l}</button>`).join('')}
+              </div>
+              <p class="sm muted mb-12">
+                ${c.mode === 'portal'
+                  ? '由本系統帶身份過去（from=portal），對面系統會當你係執委，<b>毋須密碼</b>。你嗰個 GAS 已支援呢個做法。'
+                  : c.mode === 'dedicated'
+                    ? '喺對面系統開一個專用執委帳戶，呢度幫你自動填入帳號密碼。密碼會存喺你部機（localStorage）。'
+                    : '只會開啟連結，你需要自己喺對面登入。'}
+              </p>
+              <div class="row gap-8 wrap">
+                <button class="btn btn-primary" data-act="open">${icon('external', 16)} 以執委身份開啟</button>
+                <button class="btn" data-act="copy-url">${icon('copy', 16)} 複製連結</button>
+                <button class="btn" data-act="qr">${icon('qr', 16)} QR Code</button>
+                <button class="btn" data-act="copy-cred">${icon('key', 16)} 複製帳密</button>
+              </div>
+              <div class="mt-16">
+                <label class="check"><input type="checkbox" id="embedToggle" ${showEmbed ? 'checked' : ''}> 喺下面內嵌預覽</label>
+                <div class="hint mt-4">部分網站（例如 Google）唔允許被內嵌，會顯示空白，屬正常。</div>
+              </div>
             </div>
-          </div>`;
-        }).join('')}
-      </div>
-      <div style="padding:12px 16px;border-top:1px solid var(--line-2)">
-        <p class="xs faint">出席率、團費、會議參與由本系統計算；獎章／訓練進度請到進度系統查閱。</p>
-      </div>
-    </div>
+            <div class="center">
+              <div class="qr-box" style="width:170px;margin:0 auto">
+                <div id="progQr">${qrSvg(launch || c.url, 4, 1)}</div>
+              </div>
+              <div class="xs faint mt-8">掃描即可開啟進度系統</div>
+              <button class="btn btn-xs mt-8" data-act="qr">下載 QR</button>
+            </div>
+          </div>
 
-    <div class="card">
-      <div class="card-head"><div class="card-title">存取身份</div></div>
-      <div style="padding:16px 18px">
-        <dl class="kv">
-          <dt>目前身分</dt><dd><span class="badge b-brand">${esc(role.name)}</span></dd>
-          <dt>登入帳號</dt><dd class="mono">${esc(current()?.username || '—')}</dd>
-          <dt>傳遞身份</dt><dd><b>執委會</b>（executive）</dd>
-        </dl>
-        <div class="mt-16" style="padding:12px;background:var(--brand-50);border-radius:var(--r);border:1px solid var(--brand-100)">
-          <div class="row gap-8"><span style="color:var(--brand-700);display:flex">${icon('shield', 16)}</span>
-            <div class="sm" style="color:var(--brand-800)">由呢度連過去時，系統會以「執委會」身份進入，可查閱全團團員進度。</div></div>
+          ${showEmbed ? `<div class="mt-16"><iframe src="${esc(launch || c.url)}" style="width:100%;height:520px;border:1px solid var(--line);border-radius:var(--r-lg);background:#fff"></iframe></div>` : ''}
         </div>
-        <div class="mt-12 hint">接上後端後，呢度可以改用一次性的簽名連結（SSO token），進入時自動帶身份，唔使再登入一次。</div>
       </div>
-    </div>
-  </div>`;
-}
 
-function connectedView(url, name, role) {
-  const shareUrl = url;
-  return `
-  <div class="card">
-    <div class="card-head">
-      <div class="row gap-10">
-        <div class="stat-ic" style="background:var(--ok-bg);color:var(--ok)">${icon('check', 18)}</div>
-        <div><div class="card-title">${esc(name)}</div>
-          <div class="card-sub mono" style="word-break:break-all">${esc(url)}</div></div>
+      <div class="card">
+        <div class="card-head"><div><div class="card-title">執委專用帳戶 / Portal 身份</div>
+          <div class="card-sub">你問嘅問題：應該點揀？</div></div></div>
+        <div style="padding:18px">
+          ${noteBox(`<b>建議：用 Portal 信任模式（唔使開新帳號）。</b><br>
+            因為你嗰邊嘅系統（VSBADGE 架構）已經支援 <code>&amp;from=portal</code>，只要帶旅團編號、角色同顯示名，就會當你係執委直接入，<b>唔使密碼、唔使喺 URL 出現密碼</b>。<br><br>
+            <b>如果想保守啲</b>：喺對面系統正常開一個「執委」帳戶，揀「專用帳戶」模式，好處係可以隨時喺對面停用該帳戶；壞處係密碼會經過網址，建議用完清一清瀏覽器紀錄。`, 'brand')}
+          <div class="grid g-2 mt-16" style="gap:14px">
+            <div class="card" style="box-shadow:none">
+              <div style="padding:14px 16px">
+                <div class="semibold sm mb-6" style="color:var(--brand-700)">Portal 模式（推薦）</div>
+                <ul class="xs muted" style="padding-left:16px;line-height:1.9;margin:0">
+                  <li>免在對面開帳號</li>
+                  <li>URL 唔會出現密碼</li>
+                  <li>要對面系統支援 <code>from=portal</code></li>
+                  <li>隨時喺「設定」關掉即可</li>
+                </ul>
+              </div>
+            </div>
+            <div class="card" style="box-shadow:none">
+              <div style="padding:14px 16px">
+                <div class="semibold sm mb-6" style="color:var(--brand-700)">專用帳戶模式</div>
+                <ul class="xs muted" style="padding-left:16px;line-height:1.9;margin:0">
+                  <li>對面可以單獨停用／改密碼</li>
+                  <li>唔需要改對面系統程式</li>
+                  <li>帳密要存喺本機，URL 會帶密碼</li>
+                  <li>建議只喺信任嘅電腦用</li>
+                </ul>
+              </div>
+            </div>
+          </div>
+          <div class="mt-16">
+            ${kv([
+              ['目前模式', esc({ portal: 'Portal 信任模式', dedicated: '專用帳戶', link: '只開連結' }[c.mode])],
+              ['傳送身份', esc(c.mode === 'portal' ? `角色 ${role} · 旅團 ${c.portal?.unitParam || ''}` : c.mode === 'dedicated' ? `帳號 ${c.dedicated?.username || '（未填）'}` : '唔傳身份')],
+              ['登入者', `${esc(displayName())}（${esc(current()?.role === 'exco' ? '執委' : current()?.role === 'leader' ? '領袖' : '超管')}）`]
+            ])}
+          </div>
+        </div>
       </div>
-      <span class="badge b-ok"><span class="dot"></span>已接駁</span>
     </div>
-    <div style="padding:22px">
-      <div class="grid g-2" style="align-items:center">
+
+    <div class="col gap-16">
+      <div class="card">
+        <div class="card-head"><div class="card-title">本系統保留嘅進度相關資料</div></div>
         <div>
-          <p class="semibold mb-8">直接用執委會身份進入</p>
-          <p class="sm muted mb-16">喺新分頁開啟進度紀錄系統，可查閱同更新全團團員嘅進度紀錄。</p>
-          <div class="row gap-8 wrap">
-            <button class="btn btn-primary" data-act="open">${icon('external', 16)} 開啟進度系統</button>
-            <button class="btn" data-act="copy">${icon('copy', 16)} 複製連結</button>
-            <button class="btn" data-act="qr">${icon('qr', 16)} QR Code</button>
-          </div>
+          ${members().filter(m => m.status === 'active').slice(0, 8).map(m => `
+            <div class="list-item" data-open="${m.id}">
+              <div class="li-main"><div class="li-t">${esc(m.name)}</div>
+                <div class="li-s">${esc(m.role || '團員')}${m.birthday ? ` · 生日 ${esc(m.birthday)}` : ''}</div></div>
+              ${icon('chevronR', 15)}
+            </div>`).join('')}
         </div>
-        <div class="center">
-          <div class="qr-box" style="width:150px;margin:0 auto">
-            <div id="progQr">${qrSvg(shareUrl, 5, 1)}</div>
-          </div>
-          <div class="xs faint mt-8">掃描即可開啟進度系統</div>
+        <div style="padding:12px 16px;border-top:1px solid var(--line-2)" class="xs faint">
+          獎章／訓練進度由對面系統管理；呢度只保留出席率、團費同物料紀錄。
         </div>
       </div>
-      <div class="mt-16 row gap-8 wrap">
-        <label class="check"><input type="checkbox" id="embedToggle"> 喺下面內嵌預覽</label>
-        <span class="xs faint">（部分網站唔允許內嵌，會顯示空白）</span>
-      </div>
-      <div id="embedWrap" class="hide mt-12">
-        <iframe src="${esc(url)}" style="width:100%;height:460px;border:1px solid var(--line);border-radius:var(--r-lg);background:#fff"></iframe>
-      </div>
-    </div>
-  </div>`;
-}
 
-function setupView() {
-  return `
-  <div class="card">
-    <div class="card-head">
-      <div><div class="card-title">接駁你現有嘅進度紀錄系統</div>
-        <div class="card-sub">填一次網址，之後每個月開呢頁一撳就過去</div></div>
-      <span class="badge b-warn"><span class="dot"></span>未設定</span>
-    </div>
-    <div style="padding:26px 22px">
-      <div class="grid g-2" style="align-items:start">
-        <div>
-          <div class="field">
-            <label class="label">進度系統網址 <span class="req">*</span></label>
-            <input class="input" id="p-url" placeholder="https://docs.google.com/spreadsheets/d/…">
-            <div class="hint mt-4">支援 Google Sheet、Notion、或其他 Web App 網址。</div>
-          </div>
-          <div class="field mt-12">
-            <label class="label">顯示名稱</label>
-            <input class="input" id="p-name" value="團員進度紀錄系統">
-          </div>
-          ${can('progress.config')
-            ? `<button class="btn btn-primary mt-16" data-act="save">${icon('save', 16)} 儲存並接駁</button>`
-            : `<div class="hint mt-16">只有領袖同超級管理員可以設定呢個網址。</div>`}
+      <div class="card">
+        <div class="card-head"><div class="card-title">連結內容預覽</div></div>
+        <div style="padding:14px 16px">
+          <div class="mono xs" style="word-break:break-all;background:var(--line-2);padding:10px;border-radius:10px">${esc(launch || c.url)}</div>
+          ${c.mode === 'portal' ? `<div class="hint mt-8">對面系統見到 <code>from=portal</code> 就會以 ${esc(role)} 身份直接進入，唔會再問密碼。</div>` : ''}
+          ${c.mode === 'dedicated' ? `<div class="hint mt-8" style="color:var(--danger)">注意：呢條連結含有帳號密碼，唔好喺公共電腦留低瀏覽器紀錄。</div>` : ''}
         </div>
-        <div style="padding:16px;background:var(--bg);border-radius:var(--r-lg);border:1px dashed var(--line)">
-          <div class="semibold sm mb-8">接駁後會點？</div>
-          <div class="col gap-8">
-            ${['執委會喺呢度一撳就開進度系統', '自動以「執委會」身份進入，唔使再登入', '產生 QR Code，方便團員用手機打開', '團員個人頁都會有「開啟進度紀錄」掣']
-              .map(t => `<div class="row gap-8"><span style="color:var(--brand-600);display:flex">${icon('check', 15)}</span><span class="sm">${t}</span></div>`).join('')}
-          </div>
-          <div class="mt-12 xs faint">淨係儲存一個網址，本系統唔會讀取或修改你進度系統入面嘅資料。</div>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><div class="card-title">教學</div></div>
+        <div style="padding:14px 16px">
+          <button class="btn btn-sm btn-block" data-go="#/docs">${icon('note', 15)} 睇完整接駁教學</button>
         </div>
       </div>
     </div>
-  </div>`;
+  </div>`}`;
 }
 
 export function mount(root) {
-  const db = load();
-  const url = db.settings.progressUrl;
+  const c = cfg();
+  const launch = buildUrl(c);
 
-  const open = () => { if (url) window.open(url, '_blank', 'noopener'); };
-  root.querySelectorAll('[data-act="open"]').forEach(b => b.addEventListener('click', open));
+  root.querySelectorAll('[data-open]').forEach(el => el.addEventListener('click', () => {
+    if (!el.dataset.open) return;
+    go('#/members/' + el.dataset.open);
+  }));
 
-  root.querySelectorAll('[data-act="copy"]').forEach(b => b.addEventListener('click', async () => {
-    if (await copyText(url)) toast('已複製連結', 'ok');
+  root.querySelectorAll('[data-act="open"]').forEach(b => b.addEventListener('click', () => {
+    if (launch) window.open(launch, '_blank', 'noopener');
+    else toast('未設定網址', 'err');
+  }));
+
+  root.querySelectorAll('[data-act="copy-url"]').forEach(b => b.addEventListener('click', async () => {
+    if (await copyText(launch || c.url)) toast('已複製連結', 'ok');
+  }));
+
+  root.querySelectorAll('[data-act="copy-cred"]').forEach(b => b.addEventListener('click', async () => {
+    const txt = c.mode === 'dedicated'
+      ? `進度系統：${c.name}\n網址：${c.url}\n帳號：${c.dedicated?.username || '（未設定）'}\n密碼：${c.dedicated?.password || '（未設定）'}`
+      : `進度系統：${c.name}\n網址：${c.url}\n身份：以 82venture Portal 執委身份進入（免密碼）`;
+    if (await copyText(txt)) toast('已複製帳密／連結', 'ok');
   }));
 
   root.querySelectorAll('[data-act="qr"]').forEach(b => b.addEventListener('click', async () => {
     await modal({
-      title: '進度系統 QR Code',
-      sub: db.settings.progressName,
+      title: '進度系統 QR Code', sub: c.name,
       body: `<div class="center">
-          <div class="qr-box" style="width:260px">${qrSvg(url, 7, 2)}</div>
-          <div class="sm muted mt-12" style="word-break:break-all">${esc(url)}</div>
+          <div class="qr-box" style="width:260px"><div id="qrHost">${qrSvg(launch || c.url, 6, 2)}</div></div>
+          <div class="sm muted mt-12" style="word-break:break-all">${esc(launch || c.url)}</div>
         </div>`,
-      actions: [{ label: '關閉', class: 'btn', value: null }]
+      actions: [{ label: '下載 SVG', class: 'btn', onClick: el => {
+        const host = el.querySelector('#qrHost');
+        downloadQrSvg(launch || c.url, '進度系統QR.svg', 8, 3);
+        return false;
+      } }, { label: '關閉', class: 'btn-primary', value: null }]
     });
+  }));
+
+  const toggle = root.querySelector('#embedToggle');
+  if (toggle) toggle.addEventListener('change', () => { showEmbed = toggle.checked; refresh(); });
+
+  root.querySelectorAll('[data-mode]').forEach(b => b.addEventListener('click', async () => {
+    if (b.disabled || !can('progress.config')) return;
+    const m = b.dataset.mode;
+    const p = profile();
+    p.progress = { ...(p.progress || {}), mode: m };
+    commit(); toast('已切換連接模式', 'ok'); refresh();
   }));
 
   root.querySelectorAll('[data-act="config"]').forEach(b => b.addEventListener('click', async () => {
+    const cc = cfg();
+    const list = members();
     const r = await modal({
-      title: '設定進度系統',
-      body: `<div class="field"><label class="label">網址</label>
-          <input class="input" id="q-url" value="${esc(url)}" placeholder="https://…"></div>
-        <div class="field mt-12"><label class="label">顯示名稱</label>
-          <input class="input" id="q-name" value="${esc(db.settings.progressName || '')}"></div>
-        <div class="hint mt-12">留空網址即取消接駁。</div>`,
-      actions: [
-        { label: can('progress.config') ? '移除接駁' : '取消', class: 'btn', value: 'clear' },
+      title: '設定進度系統接駁', wide: true,
+      body: `
+        <div class="grid g-2" style="gap:12px">
+          <div class="field" style="grid-column:1/-1"><label class="label">進度系統網址 <span class="req">*</span></label>
+            <input class="input" id="q-url" value="${esc(cc.url)}" placeholder="https://script.google.com/macros/s/…/exec"></div>
+          <div class="field" style="grid-column:1/-1"><label class="label">顯示名稱</label>
+            <input class="input" id="q-name" value="${esc(cc.name)}"></div>
+          <div class="field"><label class="label">連接模式</label>
+            <select class="select" id="q-mode">
+              <option value="portal" ${cc.mode === 'portal' ? 'selected' : ''}>Portal 信任模式（推薦）</option>
+              <option value="dedicated" ${cc.mode === 'dedicated' ? 'selected' : ''}>專用帳戶（自動帶帳密）</option>
+              <option value="link" ${cc.mode === 'link' ? 'selected' : ''}>只開連結</option>
+            </select></div>
+          <div class="field"><label class="label">Portal 角色</label>
+            <input class="input" id="q-role" value="${esc(cc.portal?.role || 'exec_committee')}" placeholder="exec_committee / branch_leader"></div>
+          <div class="field"><label class="label">旅團編號參數（u）</label>
+            <input class="input" id="q-unit" value="${esc(cc.portal?.unitParam || load().unitCode)}"></div>
+          <div class="field"><label class="label">Portal 顯示名（ymis 值）</label>
+            <input class="input" id="q-ymis" value="${esc(cc.portal?.ymis || '')}" placeholder="例：EXCO-82 或留空"></div>
+          <div class="field"><label class="label">其他參數（& 分隔）</label>
+            <input class="input" id="q-extra" value="${esc(cc.portal?.extraParams || 'embed=1')}"></div>
+          <div class="field"><label class="label">專用帳戶登入帳號</label>
+            <input class="input" id="q-duser" value="${esc(cc.dedicated?.username || '')}"></div>
+          <div class="field"><label class="label">專用帳戶密碼</label>
+            <input class="input" id="q-dpass" type="text" value="${esc(cc.dedicated?.password || '')}"></div>
+          <div class="field"><label class="label">帳號參數名</label>
+            <input class="input" id="q-puser" value="${esc(cc.paramUser)}" placeholder="ymis / u / account"></div>
+          <div class="field"><label class="label">密碼參數名</label>
+            <input class="input" id="q-ppass" value="${esc(cc.paramPass)}" placeholder="p / pw / password"></div>
+        </div>
+        <div class="hint mt-12">Portal 模式：連結會係 <code>…/exec?u=${esc(load().unitCode)}&role=exec_committee&from=portal&embed=1</code>，對面系統會直接當你係執委。</div>
+        <div class="hint mt-8" style="color:var(--danger)">專用帳戶模式嘅密碼會存喺呢部電腦（localStorage）同出現在網址，請自行衡量風險。</div>`,
+      actions: [{ label: '取消', class: 'btn', value: null },
         { label: '儲存', class: 'btn-primary', onClick: el => ({
-            url: el.querySelector('#q-url').value.trim(),
-            name: el.querySelector('#q-name').value.trim() || '團員進度紀錄系統' })}
-      ]
+          url: el.querySelector('#q-url').value.trim(),
+          name: el.querySelector('#q-name').value.trim() || '團員進度紀錄系統',
+          mode: el.querySelector('#q-mode').value,
+          portal: {
+            unitParam: el.querySelector('#q-unit').value.trim(),
+            role: el.querySelector('#q-role').value.trim(),
+            ymis: el.querySelector('#q-ymis').value.trim(),
+            extraParams: el.querySelector('#q-extra').value.trim()
+          },
+          dedicated: {
+            username: el.querySelector('#q-duser').value.trim(),
+            password: el.querySelector('#q-dpass').value
+          },
+          paramUser: el.querySelector('#q-puser').value.trim() || 'ymis',
+          paramPass: el.querySelector('#q-ppass').value.trim() || 'p'
+        }) }]
     });
-    if (r === 'clear' && can('progress.config')) {
-      db.settings.progressUrl = ''; commit(); toast('已移除接駁'); refresh(); return;
-    }
-    if (r && typeof r === 'object') {
-      db.settings.progressUrl = r.url; db.settings.progressName = r.name;
-      commit(); toast(r.url ? '已接駁進度系統' : '已移除接駁', 'ok'); refresh();
-    }
+    if (!r) return;
+    const p = profile();
+    p.progress = { ...(p.progress || {}), ...r };
+    commit();
+    toast('已更新接駁設定', 'ok');
+    refresh();
   }));
-
-  root.querySelectorAll('[data-act="save"]').forEach(b => b.addEventListener('click', () => {
-    const u = root.querySelector('#p-url')?.value.trim();
-    const n = root.querySelector('#p-name')?.value.trim() || '團員進度紀錄系統';
-    if (!u) { toast('請填寫網址', 'err'); return; }
-    if (!/^https?:\/\//i.test(u) && !u.startsWith('/')) { toast('網址要以 http:// 或 https:// 開頭', 'err'); return; }
-    db.settings.progressUrl = u; db.settings.progressName = n; commit();
-    toast('已接駁進度系統', 'ok'); refresh();
-  }));
-
-  const embedToggle = root.querySelector('#embedToggle');
-  if (embedToggle) embedToggle.addEventListener('change', () => {
-    root.querySelector('#embedWrap')?.classList.toggle('hide', !embedToggle.checked);
-  });
 }
 
-export function refresh() {
-  window.dispatchEvent(new CustomEvent('v82:refresh'));
-}
+export function refresh() { window.dispatchEvent(new CustomEvent('v82:refresh')); }

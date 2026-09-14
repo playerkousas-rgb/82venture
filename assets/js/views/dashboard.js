@@ -1,206 +1,196 @@
 /* ============================================================
-   dashboard.js — 儀表板
+   dashboard.js — 儀表板（含生日提示、待辦通知）
    ============================================================ */
 
+import { load } from '../lib/store.js';
 import {
-  balance, monthStats, sumBy, tx, feeSummary, overdueFees,
-  upcomingMeetings, openActions, pendingMeetings, memberName,
-  statusBadge, members, constitution, articleCount, attendanceStats
+  members, birthdaySummary, feeSummary, overdueFees, upcomingMeetings, openActions,
+  notices, claims, pendingClaims, stockSummary, balance, money, tx, profile, settings
 } from '../lib/model.js';
-import { money, icon, esc, fmtDate, weekday, relDay, avatar, todayISO, monthLabel } from '../lib/util.js';
+import { esc, icon, avatar, fmtDate, relDay, todayISO } from '../lib/util.js';
+import { current, can, displayName } from '../lib/auth.js';
+import { pageHead, stat, empty, noteBox } from './ui.js';
 import { go } from '../lib/router.js';
-import { currentRole, ROLES } from '../lib/auth.js';
+import { claimForm } from './finance.js';
 
 export function title() { return '儀表板'; }
 
 export function render() {
-  const monthKey = todayISO().slice(0, 7);
-  const ms = monthStats(monthKey);
-  const total = balance();
-  const fs = feeSummary();
-  const od = overdueFees();
-  const up = upcomingMeetings(4);
-  const acts = openActions();
-  const pend = pendingMeetings();
-  const c = constitution();
-  const role = ROLES[currentRole()] || ROLES.exco;
+  const b = birthdaySummary();
+  const f = feeSummary();
+  const st = stockSummary();
+  const list = notices();
+  const today = todayISO();
+  const months = new Set(tx().map(t => String(t.date).slice(0, 7)));
+  const curMonth = today.slice(0, 7);
 
   return `
-  <div class="page-head">
-    <div>
-      <div class="page-title">你好，${esc(role.name)} 👋</div>
-      <div class="page-sub">${esc(fmtDate(todayISO(), 'full'))} · 呢度係團務一覽</div>
+  ${pageHead({
+    title: '儀表板',
+    sub: `${profile().name || ''} · 今日 ${fmtDate(today, 'full')}（${new Date().toLocaleDateString('zh-HK', { weekday: 'long' })}）`,
+    actions: `
+      <button class="btn btn-sm" data-go="#/meetings/new">${icon('plus', 15)} 開會</button>
+      <button class="btn btn-sm" data-go="#/finance/new">${icon('plus', 15)} 記帳</button>
+      <button class="btn btn-sm" data-go="#/inventory/loans?new=1">${icon('plus', 15)} 借物資</button>`
+  })}
+
+  ${list.length ? `
+  <div class="card mb-16">
+    <div class="card-head">
+      <div><div class="card-title">提示中心</div>
+        <div class="card-sub">${list.length} 項要跟進（生日、團費、申報、借用、會議行動）</div></div>
+      <span class="badge b-warn"><span class="dot"></span>${list.filter(x => x.level === 'danger').length} 項緊急</span>
     </div>
-    <div class="row gap-8 wrap no-print">
-      <button class="btn btn-soft" data-go="#/meetings/new">${icon('plus', 16)} 新增會議</button>
-      <button class="btn btn-primary" data-go="#/finance?new=1">${icon('plus', 16)} 記一筆</button>
+    <div style="padding:6px 0">
+      ${list.slice(0, 8).map(n => `
+        <div class="row gap-12" style="padding:10px 16px;border-bottom:1px solid var(--line-2);cursor:pointer" data-go="${n.link}">
+          <span class="stat-ic" style="background:var(--${n.level === 'danger' ? 'danger' : n.level === 'warn' ? 'warn' : 'brand'}-bg);color:var(--${n.level === 'danger' ? 'danger' : n.level === 'warn' ? 'warn' : 'brand'}-700)">
+            ${icon(n.kind === 'birthday' ? 'sparkle' : n.kind === 'fee' ? 'wallet' : n.kind === 'claim' ? 'note' : n.kind === 'loan' ? 'grid' : n.kind === 'agm' ? 'calendar' : 'alert', 15)}
+          </span>
+          <div class="grow sm">${esc(n.text)}</div>
+          ${icon('chevronR', 15)}
+        </div>`).join('')}
+    </div>
+  </div>` : ''}
+
+  <div class="card mb-16 quick-capture">
+    <div class="card-head">
+      <div><div class="card-title">手機快速記一筆</div>
+        <div class="card-sub">成員用手機就可以：影低單據 → 揀欄目 → 送出（唔使再開 Google Form）</div></div>
+    </div>
+    <div style="padding:14px 16px">
+      <div class="row gap-8 wrap">
+        <button class="btn btn-primary btn-lg" data-quick="claim">${icon('camera', 18)} 影相記一筆</button>
+        <button class="btn" data-go="#/finance/claims">${icon('note', 16)} 睇待批核申報</button>
+        <button class="btn" data-go="#/finance/fees">${icon('wallet', 16)} 交團費</button>
+      </div>
+      <div class="hint mt-8">送出後：司庫／領袖批核 → 自動入帳。相片會壓縮儲存，帳目可以隨時匯出 CSV / Word。</div>
     </div>
   </div>
 
   <div class="grid g-4 mb-16">
-    <div class="stat">
-      <div class="row-between">
-        <div class="stat-label">團務結餘</div>
-        <div class="stat-ic">${icon('wallet', 18)}</div>
-      </div>
-      <div class="stat-value" style="color:${total >= 0 ? 'var(--brand-700)' : 'var(--danger)'}">${esc(money(total))}</div>
-      <div class="stat-foot">累計總結餘</div>
-    </div>
-    <div class="stat">
-      <div class="row-between">
-        <div class="stat-label">本月收支</div>
-        <div class="stat-ic">${icon('chart', 18)}</div>
-      </div>
-      <div class="stat-value">${esc(money(ms.net))}</div>
-      <div class="stat-foot row gap-8">
-        <span style="color:var(--ok)">↑ ${esc(money(ms.income))}</span>
-        <span style="color:var(--danger)">↓ ${esc(money(ms.expense))}</span>
-      </div>
-    </div>
-    <div class="stat">
-      <div class="row-between">
-        <div class="stat-label">團費收繳</div>
-        <div class="stat-ic">${icon('users', 18)}</div>
-      </div>
-      <div class="stat-value">${fs.paidCount} / ${fs.total}</div>
-      <div class="bar mt-8 ${fs.rate < 50 ? 'danger' : fs.rate < 80 ? 'warn' : ''}"><span style="width:${fs.rate}%"></span></div>
-      <div class="stat-foot">${od.length ? `${od.length} 筆已逾期 · 尚欠 ${esc(money(fs.outstanding))}` : `尚欠 ${esc(money(fs.outstanding))}`}</div>
-    </div>
-    <div class="stat">
-      <div class="row-between">
-        <div class="stat-label">待處理會議</div>
-        <div class="stat-ic">${icon('calendar', 18)}</div>
-      </div>
-      <div class="stat-value">${pend.length}</div>
-      <div class="stat-foot">${acts.length} 項待辦行動未完</div>
-    </div>
+    ${stat('團員（現役）', String(members().filter(m => m.status === 'active').length), `共 ${members().length} 人（含休假／舊團員）`)}
+    ${stat('本月生日 🎂', String(b.month.length), b.in7.length ? `${b.in7.length} 位 7 日內生日` : '7 日內暫無', b.month.length ? 'brand' : '')}
+    ${stat('結餘', money(balance()), `${months.has(curMonth) ? '本月已有記錄' : '本月未有記錄'} · 期初 ${money(settings().openingBalance || 0)}`)}
+    ${stat(f.unpaidCount ? '未收團費' : '團費已清', f.unpaidCount ? money(f.outstanding) : '全部收齊', `${f.paidCount}/${f.total} 已收（${f.rate}%）`, f.unpaidCount ? 'warn' : 'ok')}
   </div>
 
   <div class="grid g-2-1">
     <div class="col gap-16">
-
-      <!-- 即將舉行 -->
       <div class="card">
         <div class="card-head">
-          <div>
-            <div class="card-title">即將舉行嘅會議</div>
-            <div class="card-sub">按日期排序</div>
-          </div>
-          <button class="btn btn-ghost btn-sm" data-go="#/meetings">全部 ${icon('chevronR', 14)}</button>
+          <div><div class="card-title">生日提示</div>
+            <div class="card-sub">生日前 ${settings().birthday?.remindDaysBefore || 7} 日自動提示</div></div>
+          <button class="btn btn-sm" data-go="#/members/birthdays">${icon('chevronR', 14)} 生日表</button>
         </div>
-        ${up.length ? up.map(m => `
-          <div class="list-item" data-go="#/meetings/${m.id}">
-            <div style="width:46px;text-align:center;flex:0 0 auto">
-              <div style="font-size:19px;font-weight:800;line-height:1;color:var(--brand-700)">${+m.date.slice(8, 10)}</div>
-              <div class="xs faint">${m.date.slice(5, 7)} 月</div>
-            </div>
-            <div class="li-main">
-              <div class="li-t truncate">${esc(m.title)}</div>
-              <div class="li-s">${esc(relDay(m.date))} · ${esc(m.time)} · ${esc(m.venue || '地點待定')}</div>
-            </div>
-            ${statusBadge(m.status)}
-            ${icon('chevronR', 15, 'faint')}
-          </div>`).join('') : emptyBox('暫時冇即將舉行嘅會議', 'calendar')}
+        <div>
+          ${(b.in7.length || b.month.length) ? `
+            ${b.today.map(x => bdayRow(x, '今日生日 🎂🥳')).join('')}
+            ${b.in7.filter(x => x.days > 0).map(x => bdayRow(x)).join('')}
+            ${b.month.filter(x => x.days > (settings().birthday?.remindDaysBefore || 7)).map(x => bdayRow(x)).join('')}
+          ` : empty('sparkle', '本月暫時冇團員生日', '生日資料可以喺「團員」頁修改')}
+        </div>
+        ${b.unknown.length ? `<div style="padding:12px 16px;border-top:1px solid var(--line-2)">
+          <div class="xs faint">未填生日：${esc(b.unknown.join('、'))}</div></div>` : ''}
       </div>
 
-      <!-- 團員出席率 -->
       <div class="card">
         <div class="card-head">
-          <div>
-            <div class="card-title">團員出席率</div>
-            <div class="card-sub">根據已完成會議嘅點名記錄</div>
-          </div>
-          <button class="btn btn-ghost btn-sm" data-go="#/members">全部 ${icon('chevronR', 14)}</button>
+          <div><div class="card-title">即將舉行嘅會議</div>
+            <div class="card-sub">${upcomingMeetings().length} 個</div></div>
+          <button class="btn btn-sm" data-go="#/meetings">${icon('calendar', 14)} 全部會議</button>
         </div>
-        <div style="padding:6px 14px 14px">
-          ${members().filter(m => m.status === 'active').slice(0, 6).map(m => {
-            const s = attendanceStats(m.id);
-            return `<div class="row gap-12" style="padding:9px 0;border-bottom:1px solid var(--line-2)">
-              ${avatar(m.name, 'avatar-sm')}
-              <div class="grow">
-                <div class="row-between">
-                  <span class="semibold sm">${esc(m.name)}</span>
-                  <span class="sm mono" style="color:${s.rate >= 80 ? 'var(--ok)' : s.rate >= 50 ? 'var(--warn)' : 'var(--danger)'}">${s.rate}%</span>
-                </div>
-                <div class="bar mt-4 ${s.rate >= 80 ? '' : s.rate >= 50 ? 'warn' : 'danger'}"><span style="width:${s.rate}%"></span></div>
-              </div>
-            </div>`;
-          }).join('')}
+        <div>${upcomingMeetings(4).length ? upcomingMeetings(4).map(m => `
+          <div class="list-item" data-go="#/meetings/${m.id}">
+            <span class="stat-ic">${icon('calendar', 16)}</span>
+            <div class="li-main"><div class="li-t">${esc(m.title)}</div>
+              <div class="li-s">${esc(fmtDate(m.date, 'full'))} · ${esc(m.time || '')} · ${esc(m.venue || '')}</div></div>
+            <span class="badge b-info">${relDay(m.date)}</span>
+          </div>`).join('') : empty('calendar', '暫時冇已排期嘅會議')}
         </div>
       </div>
     </div>
 
     <div class="col gap-16">
-      <!-- 待辦行動 -->
       <div class="card">
-        <div class="card-head">
-          <div>
-            <div class="card-title">待辦行動</div>
-            <div class="card-sub">由會議決議帶出</div>
+        <div class="card-head"><div class="card-title">我嘅身份</div></div>
+        <div style="padding:16px 18px">
+          <div class="row gap-12 mb-12">
+            <span class="avatar" style="background:${current()?.role === 'exco' ? '#A83A4E' : '#7B2233'}">
+              ${icon(current()?.role === 'super' ? 'shield' : current()?.role === 'leader' ? 'flag' : 'users', 17)}</span>
+            <div><div class="semibold">${esc(displayName())}</div>
+              <div class="xs muted">${esc(current()?.role === 'super' ? '超級管理員' : current()?.role === 'leader' ? '領袖' : '執行委員會')}</div></div>
           </div>
-          <span class="badge ${acts.length ? 'b-warn' : 'b-ok'}">${acts.length}</span>
+          <div class="xs faint" style="line-height:1.7">
+            ${can('admin.accounts') ? '✓ 可管理帳戶<br>' : ''}
+            ${can('constitution.edit') ? '✓ 可編輯團章<br>' : '· 團章只可閱讀<br>'}
+            ${can('inv.approve') ? '✓ 可批核物資借用<br>' : ''}
+            ${can('claim.review') ? '✓ 可批核收支申報' : ''}
+          </div>
         </div>
-        ${acts.length ? `<div style="padding:6px 14px 14px">${acts.slice(0, 5).map(a => `
-          <div class="list-item" data-go="#/meetings/${a.meetingId}" style="padding:10px 0">
-            <div class="grow">
-              <div class="li-t sm">${esc(a.text)}</div>
-              <div class="li-s">${esc(memberName(a.owner))} · 到期 ${esc(a.due || '未定')}</div>
-            </div>
-          </div>`).join('')}</div>` : emptyBox('所有行動已跟進完', 'check')}
       </div>
 
-      <!-- 團費逾期 -->
       <div class="card">
-        <div class="card-head">
-          <div>
-            <div class="card-title">團費／活動費逾期</div>
-            <div class="card-sub">需要跟進</div>
-          </div>
-          <span class="badge ${od.length ? 'b-danger' : 'b-ok'}">${od.length}</span>
+        <div class="card-head"><div class="card-title">待處理</div></div>
+        <div style="padding:6px 0">
+          ${row('#/finance/claims', 'note', '收支申報待批', pendingClaims().length)}
+          ${row('#/inventory/loans', 'grid', '物資借用待批', st.pending)}
+          ${row('#/finance/fees', 'wallet', '團費逾期', overdueFees().length)}
+          ${row('#/meetings', 'check', '會議行動未完成', openActions().length)}
+          ${row('#/inventory', 'alert', '物資缺貨', st.low.length)}
         </div>
-        ${od.length ? `<div style="padding:6px 14px 14px">${od.slice(0, 5).map(f => `
-          <div class="row gap-12" style="padding:9px 0;border-bottom:1px solid var(--line-2)">
-            ${avatar(memberName(f.memberId), 'avatar-sm')}
-            <div class="grow"><div class="sm semibold">${esc(memberName(f.memberId))}</div>
-            <div class="xs faint">${esc(f.label)}</div></div>
-            <span class="sm mono bold" style="color:var(--danger)">${esc(money(f.amount))}</span>
-          </div>`).join('')}
-          <button class="btn btn-sm btn-block mt-12" data-go="#/finance?tab=fees">去收費跟進</button>
-          </div>` : emptyBox('冇逾期款項', 'check')}
       </div>
 
-      <!-- 團章 -->
       <div class="card">
-        <div class="card-head">
-          <div class="card-title">團章</div>
-          <button class="btn btn-ghost btn-sm" data-go="#/constitution">開啟 ${icon('chevronR', 14)}</button>
+        <div class="card-head"><div class="card-title">物資快況</div></div>
+        <div style="padding:16px 18px">
+          <div class="grid g-2" style="gap:10px">
+            <div><div class="xs faint">物資種類</div><div class="semibold">${st.kinds} 種 / ${st.units} 件</div></div>
+            <div><div class="xs faint">借出中</div><div class="semibold">${st.out} 件</div></div>
+            <div><div class="xs faint">逾期未還</div><div class="semibold" style="color:${st.overdue ? 'var(--danger)' : 'inherit'}">${st.overdue} 宗</div></div>
+            <div><div class="xs faint">待批借用</div><div class="semibold">${st.pending} 宗</div></div>
+          </div>
+          <button class="btn btn-sm btn-block mt-16" data-go="#/inventory">${icon('grid', 15)} 物資紀錄</button>
         </div>
-        <div style="padding:14px 18px 18px">
-          <div class="row-between mb-8">
-            <span class="sm muted">現行版本</span>
-            <span class="bold">v${esc(c.version)}</span>
-          </div>
-          <div class="row-between mb-8">
-            <span class="sm muted">上次更新</span>
-            <span class="sm">${esc(c.updatedAt)} · ${esc(c.updatedBy)}</span>
-          </div>
-          <div class="row-between mb-12">
-            <span class="sm muted">章 / 條</span>
-            <span class="sm">${c.chapters.length} 章 · ${articleCount(c)} 條</span>
-          </div>
-          <button class="btn btn-sm btn-block" data-go="#/constitution?share=1">${icon('qr', 15)} 產生分享 QR Code</button>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><div class="card-title">快速連結</div></div>
+        <div style="padding:14px 16px" class="col gap-8">
+          <button class="btn btn-block btn-soft" data-go="#/constitution">${icon('book', 16)} 團章（雙語／輸出）</button>
+          <button class="btn btn-block btn-soft" data-go="#/progress">${icon('chart', 16)} 進度紀錄系統</button>
+          <button class="btn btn-block btn-soft" data-go="#/docs">${icon('note', 16)} 使用教學 / 多旅團</button>
         </div>
       </div>
     </div>
   </div>`;
 }
 
-function emptyBox(text, ic = 'grid') {
-  return `<div class="empty">${icon(ic, 34)}<div class="empty-title">${esc(text)}</div></div>`;
+function bdayRow(x, custom = '') {
+  const isToday = x.days === 0;
+  const when = isToday ? (custom || '今日生日') : (x.days === 1 ? '明天' : `${x.days} 日後`);
+  return `<div class="bday ${isToday ? 'today' : ''}">
+    <span class="cake">${isToday ? '🎂' : icon('sparkle', 16)}</span>
+    <div class="grow">
+      <div class="semibold sm">${esc(x.name)}</div>
+      <div class="xs faint">${Number(x.md.slice(0, 2))} 月 ${Number(x.md.slice(3))} 日${x.turning ? ` · 將滿 ${x.turning} 歲` : x.age !== null ? ` · ${x.age} 歲` : ''}</div>
+    </div>
+    <div class="when">
+      <div class="days sm" style="color:${isToday ? 'var(--accent-700)' : x.days <= 3 ? 'var(--warn)' : 'var(--muted)'}">${esc(when)}</div>
+    </div>
+  </div>`;
+}
+
+function row(link, ic, label, count) {
+  return `<div class="row gap-12" style="padding:10px 16px;border-bottom:1px solid var(--line-2);cursor:pointer" data-go="${link}">
+    <span class="stat-ic">${icon(ic, 15)}</span>
+    <div class="grow sm">${esc(label)}</div>
+    <span class="badge ${count ? 'b-warn' : 'b-grey'}">${count}</span>
+  </div>`;
 }
 
 export function mount(root) {
-  root.querySelectorAll('[data-go]').forEach(el => {
-    el.addEventListener('click', () => go(el.dataset.go));
-  });
+  root.querySelectorAll('[data-go]').forEach(el => el.addEventListener('click', () => go(el.dataset.go)));
+  root.querySelectorAll('[data-quick="claim"]').forEach(b => b.addEventListener('click', () => claimForm()));
 }
+export function refresh() { window.dispatchEvent(new CustomEvent('v82:refresh')); }
