@@ -1,375 +1,503 @@
 /* ============================================================
-   members.js — 團員進度及個人紀錄
+   members.js — 團員名冊、個人紀錄、生日表（可改、可輸出）
    ============================================================ */
 
-import { collection, find, add, update, remove } from '../lib/store.js';
+import { collection, find, add, update, remove, commit, load } from '../lib/store.js';
 import {
-  members, member, memberName, attendanceStats, fees, MEETING_TYPES,
-  statusBadge, ATTEND
+  members, member, memberName, attendanceStats, fees, memberStatus, memberBirthdayText,
+  birthdayList, birthdaysThisMonth, birthdaysWithin, birthdaySummary, money, settings, profile
 } from '../lib/model.js';
+import { parseBirthday, ageFrom, daysUntilBirthday, turningAge, todayISO, isValidBirthday } from '../lib/dates.js';
 import {
-  esc, icon, money, fmtDate, avatar, uid, todayISO, modal, confirmDlg,
-  toast, download, copyText
+  esc, icon, avatar, fmtDate, relDay, modal, confirmDlg, toast, uid, download, nf, pct
 } from '../lib/util.js';
-import { go, setQuery } from '../lib/router.js';
+import { toCSV, toWord, printDoc, download as dlFile, stamp } from '../lib/exporter.js';
+import { go, parse } from '../lib/router.js';
 import { can } from '../lib/auth.js';
+import { pageHead, tabs, empty, kv, chipbar, progressBar, noteBox } from './ui.js';
 
 let kw = '';
 let statusFilter = 'all';
-let tagFilter = 'all';
-
-const STATUS = { active: { l: '現役', c: 'b-ok' }, leave: { l: '休假', c: 'b-warn' }, alumni: { l: '舊團員', c: 'b-grey' } };
+let bdayMonth = new Date().getMonth() + 1;
+let tab = 'list';
 
 export function title() { return '團員'; }
 
 export function render(params) {
-  if (params.id === 'new') return editor(null);
-  if (params.id) return detail(params.id);
+  const id = params.id;
+  if (id === 'new') return editor(null);
+  if (id && id !== 'birthdays') return detail(id);
+  if (id === 'birthdays') return birthdayView();
   return listView();
 }
 
 /* ============================================================
-   LIST
+   名冊
    ============================================================ */
 function listView() {
   const all = members();
-  const tags = [...new Set(all.flatMap(m => m.tags || []))];
+  const S = memberStatus();
   let list = all;
   if (statusFilter !== 'all') list = list.filter(m => m.status === statusFilter);
-  if (tagFilter !== 'all') list = list.filter(m => (m.tags || []).includes(tagFilter));
   if (kw) {
     const k = kw.toLowerCase();
     list = list.filter(m => (m.name + ' ' + (m.eng || '') + ' ' + (m.role || '') + ' ' + (m.phone || '')).toLowerCase().includes(k));
   }
-  const counts = {
-    all: all.length,
-    active: all.filter(m => m.status === 'active').length,
-    leave: all.filter(m => m.status === 'leave').length,
-    alumni: all.filter(m => m.status === 'alumni').length
-  };
+  const b = birthdaySummary();
 
   return `
-  <div class="page-head">
-    <div>
-      <div class="page-title">團員</div>
-      <div class="page-sub">個人資料、出席紀錄、收費狀況同備註</div>
+  ${pageHead({
+    title: '團員',
+    sub: `${all.length} 人 · 現役 ${all.filter(m => m.status === 'active').length} 人`,
+    actions: `
+      ${can('member.export') ? `<button class="btn btn-sm" data-act="exp-csv">${icon('download', 15)} CSV</button>
+      <button class="btn btn-sm" data-act="exp-word">${icon('download', 15)} Word</button>
+      <button class="btn btn-sm" data-act="exp-bday">${icon('sparkle', 15)} 生日表</button>` : ''}
+      ${can('member.create') ? `<button class="btn btn-sm btn-primary" data-act="new">${icon('plus', 15)} 新增團員</button>` : ''}`
+  })}
+
+  <div class="grid g-3 mb-16">
+    <div class="card" style="cursor:pointer" data-go="#/members/birthdays">
+      <div style="padding:15px 16px">
+        <div class="stat-label">本月生日 🎂</div>
+        <div class="stat-value brand">${b.month.length}<span class="sm faint" style="font-weight:600"> 位</span></div>
+        <div class="stat-sub">${b.month.slice(0, 3).map(x => esc(x.name)).join('、') || '本月暫無'}${b.month.length > 3 ? ' 等' : ''}</div>
+      </div>
     </div>
-    <div class="row gap-8 wrap no-print">
-      <button class="btn" data-act="export">${icon('download', 16)} 匯出 CSV</button>
-      ${can('member.create') ? `<button class="btn btn-primary" data-act="new">${icon('plus', 16)} 新增團員</button>` : ''}
+    <div class="card">
+      <div style="padding:15px 16px">
+        <div class="stat-label">7 日內生日</div>
+        <div class="stat-value" style="color:${b.in7.length ? 'var(--warn)' : 'inherit'}">${b.in7.length}<span class="sm faint" style="font-weight:600"> 位</span></div>
+        <div class="stat-sub">${b.in7.map(x => `${esc(x.name)}（${x.days === 0 ? '今日' : x.days + '日'}）`).join('、') || '暫無'}</div>
+      </div>
+    </div>
+    <div class="card">
+      <div style="padding:15px 16px">
+        <div class="stat-label">未填生日</div>
+        <div class="stat-value">${b.unknown.length}<span class="sm faint" style="font-weight:600"> 位</span></div>
+        <div class="stat-sub truncate">${b.unknown.map(esc).join('、') || '全部已填'}</div>
+      </div>
     </div>
   </div>
 
   <div class="row-between mb-16 wrap gap-12 no-print">
-    <div class="chipbar">
-      ${[['all', '全部'], ['active', '現役'], ['leave', '休假'], ['alumni', '舊團員']]
-        .map(([k, l]) => `<button class="chip" aria-pressed="${statusFilter === k}" data-status="${k}">${l} <span class="faint">${counts[k]}</span></button>`).join('')}
-    </div>
-    <div style="position:relative;min-width:200px">
-      <input class="input" id="mSearch" placeholder="搜尋姓名／職位／電話…" value="${esc(kw)}" style="padding-left:32px">
-      <span style="position:absolute;left:10px;top:50%;transform:translateY(-50%);color:var(--faint);display:flex">${icon('search', 15)}</span>
+    ${chipbar([['all', '全部', all.length], ['active', '現役', all.filter(m => m.status === 'active').length],
+      ['leave', '休假', all.filter(m => m.status === 'leave').length], ['alumni', '舊團員', all.filter(m => m.status === 'alumni').length]], statusFilter, 'data-status')}
+    <div class="search-wrap">
+      <span class="ic">${icon('search', 15)}</span>
+      <input class="input" id="mSearch" placeholder="搜尋姓名／職位／電話…" value="${esc(kw)}">
     </div>
   </div>
-
-  ${tags.length ? `<div class="chipbar mb-16 no-print">
-    <button class="chip" aria-pressed="${tagFilter === 'all'}" data-tag="all">全部標籤</button>
-    ${tags.map(t => `<button class="chip" aria-pressed="${tagFilter === t}" data-tag="${esc(t)}">${esc(t)}</button>`).join('')}
-  </div>` : ''}
 
   <div class="card">
     ${list.length ? `<div class="scroll-x"><table class="table">
       <thead><tr>
-        <th>團員</th><th>職位</th><th>聯絡</th><th>入團日期</th>
+        <th>團員</th><th>職位</th><th>生日</th><th class="center">年齡</th>
         <th class="center">出席率</th><th class="center">收費</th><th>狀態</th><th></th>
       </tr></thead>
       <tbody>${list.map(m => {
         const s = attendanceStats(m.id);
         const mf = fees().filter(f => f.memberId === m.id);
         const unpaid = mf.filter(f => !f.paid);
+        const p = parseBirthday(m.birthday);
+        const dLeft = daysUntilBirthday(m.birthday);
         return `<tr style="cursor:pointer" data-open="${m.id}">
           <td><div class="row gap-10">${avatar(m.name)}
             <div><div class="semibold">${esc(m.name)}</div><div class="xs faint">${esc(m.eng || '')}</div></div></div></td>
-          <td><div class="sm">${esc(m.role)}</div>
-            ${(m.tags || []).length ? `<div class="row gap-4 mt-4">${m.tags.map(t => `<span class="badge b-grey">${esc(t)}</span>`).join('')}</div>` : ''}</td>
-          <td><div class="sm mono">${esc(m.phone || '—')}</div><div class="xs faint">${esc(m.email || '')}</div></td>
-          <td class="mono sm">${esc(m.join || '—')}</td>
-          <td class="center" style="min-width:92px">
+          <td><div class="sm">${esc(m.role || '—')}</div>
+            ${(m.tags || []).length ? `<div class="row gap-4 mt-4 wrap">${m.tags.map(t => `<span class="tag">${esc(t)}</span>`).join('')}</div>` : ''}</td>
+          <td class="mono sm">${p ? `${Number(p.md.slice(0, 2))}/${Number(p.md.slice(3))}${p.hasYear ? ` <span class="faint">(${p.y})</span>` : ' <span class="faint">(年份待補)</span>'}` : '<span class="faint">未填</span>'}
+            ${dLeft !== null && dLeft <= 7 ? `<div class="xs" style="color:var(--accent-700);font-weight:700">${dLeft === 0 ? '🎂 今日生日' : `${dLeft} 日後生日`}</div>` : ''}</td>
+          <td class="center mono">${ageFrom(m.birthday) ?? '—'}</td>
+          <td class="center" style="min-width:96px">
             <div class="sm mono" style="color:${s.rate >= 80 ? 'var(--ok)' : s.rate >= 50 ? 'var(--warn)' : 'var(--danger)'}">${s.rate}%</div>
-            <div class="bar mt-4 ${s.rate >= 80 ? '' : s.rate >= 50 ? 'warn' : 'danger'}"><span style="width:${s.rate}%"></span></div>
+            ${progressBar(s.rate)}
             <div class="xs faint mt-4">${s.present}/${s.total} 次</div>
           </td>
-          <td class="center">${unpaid.length
+          <td class="center">${mf.length ? (unpaid.length
             ? `<span class="badge b-danger">欠 ${unpaid.length} 筆</span>`
-            : `<span class="badge b-ok"><span class="dot"></span>已清</span>`}</td>
-          <td><span class="badge ${STATUS[m.status]?.c || 'b-grey'}"><span class="dot"></span>${STATUS[m.status]?.l || m.status}</span></td>
-          <td class="right"><button class="btn btn-xs btn-ghost" data-open="${m.id}">${icon('chevronR', 15)}</button></td>
+            : `<span class="badge b-ok"><span class="dot"></span>已清</span>`) : '<span class="faint xs">—</span>'}</td>
+          <td><span class="badge ${S[m.status]?.c || 'b-grey'}"><span class="dot"></span>${S[m.status]?.l || m.status}</span></td>
+          <td class="right">${icon('chevronR', 15)}</td>
         </tr>`;
       }).join('')}</tbody>
-    </table></div>` : `<div class="empty">${icon('users', 34)}<div class="empty-title">搵唔到團員</div></div>`}
+    </table></div>` : empty('users', '搵唔到團員', '試下清除搜尋或篩選條件')}
   </div>`;
 }
 
 /* ============================================================
-   DETAIL — 個人紀錄
+   生日表（可改、可輸出）
+   ============================================================ */
+function birthdayView() {
+  const b = birthdaySummary();
+  const opts = { includeAlumni: false };
+  const monthNames = ['一月', '二月', '三月', '四月', '五月', '六月', '七月', '八月', '九月', '十月', '十一月', '十二月'];
+  const list = birthdaysThisMonth(bdayMonth, opts);
+  const next7 = birthdaysWithin(Number(settings().birthday?.remindDaysBefore || 7), opts);
+
+  return `
+  ${pageHead({
+    title: '生日表',
+    sub: `旅團團員生日一覽 · 生日前 ${settings().birthday?.remindDaysBefore || 7} 日自動提示`,
+    actions: `
+      <button class="btn btn-sm" data-act="exp-bday-word">${icon('download', 15)} Word</button>
+      <button class="btn btn-sm" data-act="exp-bday-pdf">${icon('print', 15)} PDF</button>
+      <button class="btn btn-sm" data-act="exp-bday-csv">${icon('download', 15)} CSV</button>
+      <button class="btn btn-sm" data-act="exp-bday-ics">${icon('calendar', 15)} 匯入日曆（.ics）</button>`
+  })}
+
+  ${next7.length ? `<div class="card mb-16">${noteBox(`<b>${next7.length} 位</b>團員生日快到：` +
+    next7.map(x => `${esc(x.name)}（${x.days === 0 ? '今日' : x.days + ' 日後'}，${Number(x.md.slice(0, 2))} 月 ${Number(x.md.slice(3))} 日${x.turning ? ` 將滿 ${x.turning} 歲` : ''}）`).join('、'), 'warn')}</div>` : ''}
+
+  ${chipbar(monthNames.map((n, i) => [String(i + 1), n, birthdaysThisMonth(i + 1, opts).length]),
+    String(bdayMonth), 'data-month')}
+
+  <div class="card mt-16">
+    <div class="card-head">
+      <div><div class="card-title">${monthNames[bdayMonth - 1]}生日團員</div>
+        <div class="card-sub">${list.length} 位</div></div>
+    </div>
+    <div>
+      ${list.length ? list.map(x => {
+        const m = x.member;
+        return `<div class="bday ${x.days === 0 ? 'today' : ''}" style="cursor:pointer" data-open="${m.id}">
+          <span class="cake">${icon('sparkle', 16)}</span>
+          <div class="grow">
+            <div class="semibold sm">${esc(m.name)} <span class="faint xs">${esc(m.role || '')}</span></div>
+            <div class="xs faint">${Number(x.md.slice(0, 2))} 月 ${Number(x.md.slice(3))} 日${x.turning ? ` · 將滿 ${x.turning} 歲` : x.age !== null ? ` · ${x.age} 歲` : ''}${m.phone ? ` · ${esc(m.phone)}` : ''}</div>
+          </div>
+          <div class="when sm ${x.days <= 7 ? '' : 'faint'}" style="font-weight:700;color:${x.days === 0 ? 'var(--accent-700)' : x.days <= 7 ? 'var(--warn)' : 'var(--muted)'}">
+            ${x.days === 0 ? '🎂 今日' : x.days + ' 日後'}
+          </div>
+        </div>`;
+      }).join('') : empty('sparkle', `${monthNames[bdayMonth - 1]}冇團員生日`)}
+    </div>
+  </div>
+
+  <div class="card mt-16">
+    <div class="card-head"><div><div class="card-title">全年生日表</div>
+      <div class="card-sub">可以列印出嚟貼喺旅部</div></div></div>
+    <div class="scroll-x">
+      <table class="table table-compact">
+        <thead><tr><th>月份</th><th>團員</th><th class="center">日期</th><th class="center">年齡</th></tr></thead>
+        <tbody>
+          ${monthNames.map((n, i) => {
+            const rows = birthdaysThisMonth(i + 1, opts);
+            return `<tr>
+              <td class="semibold">${n}</td>
+              <td>${rows.map(x => esc(x.name)).join('、') || '<span class="faint">—</span>'}</td>
+              <td class="center mono">${rows.map(x => `${Number(x.md.slice(0, 2))}/${Number(x.md.slice(3))}`).join('、') || '<span class="faint">—</span>'}</td>
+              <td class="center mono">${rows.map(x => (turningAge(x.member.birthday) ?? '—')).join('、')}</td>
+            </tr>`;
+          }).join('')}
+        </tbody>
+      </table>
+    </div>
+  </div>`;
+}
+
+/* ============================================================
+   個人紀錄
    ============================================================ */
 function detail(id) {
   const m = member(id);
-  if (!m) return `<div class="card"><div class="empty">搵唔到呢位團員</div></div>`;
+  if (!m) return `<div class="card">${empty('users', '搵唔到呢位團員')}</div>`;
   const s = attendanceStats(m.id);
   const myFees = fees().filter(f => f.memberId === id);
   const doneMeetings = collection('meetings').filter(x => x.status === 'done');
-  const myActions = [];
-  collection('meetings').forEach(mt => (mt.decisions || []).forEach(d => {
-    if (d.owner === id) myActions.push({ ...d, meetingTitle: mt.title, meetingId: mt.id });
-  }));
+  const myLoans = collection('invLoans').filter(l => l.borrowerId === id || l.borrowerName === m.name);
+  const dLeft = daysUntilBirthday(m.birthday);
 
   return `
-  <div class="no-print mb-12"><button class="btn btn-ghost btn-sm" data-go="#/members">${icon('chevronL', 15)} 返回團員列表</button></div>
+  ${pageHead({
+    title: m.name,
+    sub: `${m.eng || ''}${m.eng ? ' · ' : ''}${m.role || '未有職位'} · ${memberStatus()[m.status]?.l || ''}`,
+    actions: `
+      <button class="btn btn-sm" data-go="#/members">${icon('chevronL', 15)} 返回名冊</button>
+      ${can('member.edit') ? `<button class="btn btn-sm btn-primary" data-act="edit" data-id="${m.id}">${icon('edit', 15)} 編輯</button>` : ''}`
+  })}
 
-  <div class="page-head">
-    <div class="row gap-16 grow">
-      ${avatar(m.name, 'avatar-lg')}
-      <div class="grow">
-        <div class="row gap-8 wrap">
-          <span class="page-title">${esc(m.name)}</span>
-          <span class="badge ${STATUS[m.status]?.c || 'b-grey'}"><span class="dot"></span>${STATUS[m.status]?.l || m.status}</span>
-        </div>
-        <div class="page-sub">${esc(m.eng || '')} · ${esc(m.role)} · ${esc(m.join || '')} 入團</div>
-        ${(m.tags || []).length ? `<div class="row gap-4 mt-8">${m.tags.map(t => `<span class="badge b-grey">${esc(t)}</span>`).join('')}</div>` : ''}
-      </div>
-    </div>
-    <div class="row gap-8 wrap no-print">
-      <button class="btn" data-act="copy-contact">${icon('copy', 16)} 複製聯絡</button>
-      ${can('member.edit') ? `<button class="btn" data-act="edit">${icon('edit', 16)} 編輯資料</button>` : ''}
-      ${can('member.delete') ? `<button class="btn btn-danger" data-act="del">${icon('trash', 16)}</button>` : ''}
-    </div>
-  </div>
-
-  <div class="grid g-4 mb-16">
-    <div class="stat"><div class="stat-label">出席率</div>
-      <div class="stat-value" style="color:${s.rate >= 80 ? 'var(--ok)' : s.rate >= 50 ? 'var(--warn)' : 'var(--danger)'}">${s.rate}%</div>
-      <div class="stat-foot">${s.present} / ${s.total} 次會議</div></div>
-    <div class="stat"><div class="stat-label">出席明細</div>
-      <div class="stat-value" style="font-size:19px">${s.late} 遲 · ${s.apology} 假 · ${s.absent} 缺</div>
-      <div class="stat-foot">已完成會議共 ${s.total} 次</div></div>
-    <div class="stat"><div class="stat-label">收費狀況</div>
-      <div class="stat-value">${myFees.filter(f => f.paid).length} / ${myFees.length}</div>
-      <div class="stat-foot">${myFees.filter(f => !f.paid).length
-        ? `尚欠 ${esc(money(myFees.filter(f => !f.paid).reduce((a, b) => a + b.amount, 0)))}`
-        : '全部已清'}</div></div>
-    <div class="stat"><div class="stat-label">負責行動</div>
-      <div class="stat-value">${myActions.filter(a => !a.done).length}</div>
-      <div class="stat-foot">共 ${myActions.length} 項決議行動</div></div>
-  </div>
+  ${dLeft !== null && dLeft <= (settings().birthday?.remindDaysBefore || 7) ? noteBox(
+    dLeft === 0 ? `🎂 今日係 ${esc(m.name)} 生日！` : `🎂 ${esc(m.name)} ${dLeft} 日後生日（${memberBirthdayText(m)}${turningAge(m.birthday) ? `，將滿 ${turningAge(m.birthday)} 歲` : ''}）`, 'warn') + '<div class="mb-16"></div>' : ''}
 
   <div class="grid g-2-1">
     <div class="col gap-16">
-      <!-- 個人資料 -->
       <div class="card">
         <div class="card-head"><div class="card-title">基本資料</div></div>
-        <div style="padding:16px 18px">
-          <dl class="kv">
-            <dt>中文姓名</dt><dd>${esc(m.name)}</dd>
-            <dt>英文姓名</dt><dd>${esc(m.eng || '—')}</dd>
-            <dt>團內職位</dt><dd>${esc(m.role || '—')}</dd>
-            <dt>電話</dt><dd class="mono">${esc(m.phone || '—')}</dd>
-            <dt>電郵</dt><dd>${esc(m.email || '—')}</dd>
-            <dt>入團日期</dt><dd class="mono">${esc(m.join || '—')}</dd>
-          </dl>
+        <div style="padding:18px">
+          ${kv([
+            ['姓名', `<b>${esc(m.name)}</b>`],
+            ['英文名', esc(m.eng || '—')],
+            ['生日', `${esc(memberBirthdayText(m))}${ageFrom(m.birthday) !== null ? ` · ${ageFrom(m.birthday)} 歲` : ''}`],
+            ['職位', esc(m.role || '—')],
+            ['聯絡電話', esc(m.phone || '—')],
+            ['電郵', esc(m.email || '—')],
+            ['入團日期', esc(m.join || '—')],
+            ['標籤', (m.tags || []).map(t => `<span class="tag">${esc(t)}</span>`).join(' ') || '—'],
+            ['狀態', `<span class="badge ${memberStatus()[m.status]?.c || 'b-grey'}">${memberStatus()[m.status]?.l || m.status}</span>`],
+            ['備註', esc(m.note || '—')]
+          ])}
         </div>
       </div>
 
-      <!-- 出席紀錄 -->
       <div class="card">
-        <div class="card-head">
-          <div><div class="card-title">出席紀錄</div><div class="card-sub">嚟自已完成會議嘅點名</div></div>
+        <div class="card-head"><div><div class="card-title">出席紀錄</div>
+          <div class="card-sub">出席 ${s.present} · 遲到 ${s.late} · 請假 ${s.apology} · 缺席 ${s.absent}</div></div>
+          <span class="badge ${s.rate >= 80 ? 'b-ok' : s.rate >= 50 ? 'b-warn' : 'b-danger'}">${s.rate}%</span></div>
+        <div>
+          ${doneMeetings.length ? doneMeetings.map(mt => {
+            const a = (mt.attendance || {})[id];
+            const label = { present: ['出席', 'b-ok'], late: ['遲到', 'b-warn'], apology: ['請假', 'b-info'], absent: ['缺席', 'b-danger'] }[a] || ['未記錄', 'b-grey'];
+            return `<div class="list-item" data-go="#/meetings/${mt.id}">
+              <div class="li-main"><div class="li-t">${esc(mt.title)}</div>
+                <div class="li-s mono">${esc(mt.date)}</div></div>
+              <span class="badge ${label[1]}">${label[0]}</span></div>`;
+          }).join('') : empty('calendar', '暫無會議紀錄')}
         </div>
-        ${doneMeetings.length ? `<div class="scroll-x"><table class="table table-compact">
-          <thead><tr><th>會議</th><th>日期</th><th class="center">出席狀況</th></tr></thead>
-          <tbody>${doneMeetings.sort((a, b) => b.date.localeCompare(a.date)).map(mt => {
-            const st = (mt.attendance || {})[id];
-            const a = st ? ATTEND[st] : null;
-            return `<tr>
-              <td><div class="sm semibold">${esc(mt.title)}</div>
-                <div class="xs faint">${esc(MEETING_TYPES[mt.type] || '')}</div></td>
-              <td class="mono sm">${esc(mt.date)}</td>
-              <td class="center">${a ? `<span class="badge ${a.cls}"><span class="dot"></span>${a.label}</span>`
-                : '<span class="xs faint">未點名</span>'}</td></tr>`;
-          }).join('')}</tbody></table></div>` : '<div class="empty sm">仲未完成任何會議</div>'}
-      </div>
-
-      <!-- 負責行動 -->
-      <div class="card">
-        <div class="card-head"><div class="card-title">負責嘅行動</div>
-          <div class="card-sub">由會議決議分派</div></div>
-        ${myActions.length ? `<div>${myActions.map(a => `
-          <div class="list-item" data-go="#/meetings/${a.meetingId}">
-            <span style="color:${a.done ? 'var(--ok)' : 'var(--faint)'};display:flex">${icon('check', 17)}</span>
-            <div class="li-main">
-              <div class="li-t sm" style="${a.done ? 'text-decoration:line-through;color:var(--faint)' : ''}">${esc(a.text)}</div>
-              <div class="li-s">${esc(a.meetingTitle)} · 到期 ${esc(a.due || '未定')}</div>
-            </div>
-            <span class="badge ${a.done ? 'b-ok' : 'b-warn'}">${a.done ? '完成' : '待辦'}</span>
-          </div>`).join('')}</div>` : '<div class="empty sm">暫時冇指派行動</div>'}
       </div>
     </div>
 
     <div class="col gap-16">
-      <!-- 收費 -->
       <div class="card">
-        <div class="card-head"><div><div class="card-title">收費記錄</div>
-          <div class="card-sub">團費同活動費</div></div>
-          <button class="btn btn-ghost btn-sm" data-go="#/finance?tab=fees">管理</button></div>
-        ${myFees.length ? `<div>${myFees.map(f => `
-          <div class="row gap-10" style="padding:11px 16px;border-bottom:1px solid var(--line-2)">
-            <div class="grow"><div class="sm semibold">${esc(f.label)}</div>
-              <div class="xs faint">${esc(f.kind)} · 到期 ${esc(f.due || '—')}</div></div>
-            <div class="right"><div class="sm mono bold">${esc(money(f.amount))}</div>
-              ${f.paid ? `<span class="badge b-ok"><span class="dot"></span>已收</span>`
-                       : `<span class="badge b-warn"><span class="dot"></span>未收</span>`}</div>
-          </div>`).join('')}</div>` : '<div class="empty sm">冇收費記錄</div>'}
-      </div>
-
-      <!-- 備註 -->
-      <div class="card">
-        <div class="card-head">
-          <div><div class="card-title">領袖備註</div><div class="card-sub">觀察、跟進事項</div></div>
-          ${can('member.note') ? `<button class="btn btn-sm" data-act="edit-note">${icon('edit', 15)} ${m.note ? '編輯' : '新增'}</button>` : ''}
-        </div>
-        <div style="padding:16px 18px">
-          ${m.note ? `<div style="white-space:pre-wrap;font-size:14px;line-height:1.75">${esc(m.note)}</div>`
-                   : '<div class="faint sm">暫時冇備註</div>'}
+        <div class="card-head"><div class="card-title">收費紀錄</div>
+          <div class="card-sub">${myFees.filter(f => f.paid).length}/${myFees.length} 已收</div></div>
+        <div>${myFees.length ? myFees.map(f => `
+          <div class="list-item">
+            <div class="li-main"><div class="li-t">${esc(f.label || f.period || '團費')}</div>
+              <div class="li-s">${money(f.amount)}${f.due ? ` · 到期 ${esc(f.due)}` : ''}${f.paidDate ? ` · 已收 ${esc(f.paidDate)}` : ''}</div></div>
+            ${f.paid ? `<span class="badge b-ok"><span class="dot"></span>已收</span>`
+              : can('fee.mark') ? `<button class="btn btn-xs" data-act="mark-fee" data-id="${f.id}">標記已收</button>`
+              : `<span class="badge b-danger">未收</span>`}
+          </div>`).join('') : empty('wallet', '暫無收費紀錄')}
         </div>
       </div>
 
-      <!-- 進度系統 -->
       <div class="card">
-        <div class="card-head"><div class="card-title">進度紀錄</div></div>
-        <div style="padding:16px 18px">
-          <p class="sm muted mb-12">團員嘅進度紀錄（獎章、訓練、評核）放喺現有系統管理，由呢度直接過去。</p>
-          <button class="btn btn-sm btn-block" data-go="#/progress">${icon('external', 15)} 開啟進度紀錄系統</button>
+        <div class="card-head"><div class="card-title">物資借用</div></div>
+        <div>${myLoans.length ? myLoans.slice(0, 6).map(l => {
+          const item = find('invItems', l.itemId);
+          return `<div class="list-item" data-go="#/inventory/loans">
+            <div class="li-main"><div class="li-t">${esc(item?.name || '物資')} ×${l.qty}</div>
+              <div class="li-s">${esc(l.outDate || '')} → ${esc(l.dueDate || '')}</div></div>
+            <span class="badge b-grey">${esc(l.status)}</span></div>`;
+        }).join('') : empty('grid', '暫無借用紀錄')}
         </div>
       </div>
+
+      ${can('member.note') ? `<div class="card">
+        <div class="card-head"><div class="card-title">領袖備註</div></div>
+        <div style="padding:16px 18px">
+          <textarea class="textarea" id="noteBox" placeholder="例：本年負責先鋒工程訓練，10 月需覆誓…">${esc(m.note || '')}</textarea>
+          <button class="btn btn-sm btn-primary btn-block mt-12" data-act="save-note" data-id="${m.id}">${icon('save', 15)} 儲存備註</button>
+        </div>
+      </div>` : ''}
+
+      ${can('member.delete') ? `<button class="btn btn-danger btn-block" data-act="del" data-id="${m.id}">${icon('trash', 15)} 刪除此團員</button>` : ''}
     </div>
   </div>`;
 }
 
 /* ============================================================
-   EDITOR
+   編輯
    ============================================================ */
-function editor(m) {
-  const d = m || { name: '', eng: '', role: '隊員', phone: '', email: '', join: todayISO(), status: 'active', tags: [], note: '' };
+function editor(id) {
+  const m = id ? member(id) : null;
   return `
-  <div class="no-print mb-12"><button class="btn btn-ghost btn-sm" data-go="#/members">${icon('chevronL', 15)} 返回</button></div>
-  <div class="page-head"><div><div class="page-title">${m ? '編輯團員' : '新增團員'}</div>
-    <div class="page-sub">基本資料同團內職位</div></div></div>
-
-  <div class="card card-pad" style="max-width:720px">
-    <div class="grid g-2">
-      <div class="field"><label class="label">中文姓名 <span class="req">*</span></label>
-        <input class="input" id="f-name" value="${esc(d.name)}"></div>
-      <div class="field"><label class="label">英文姓名</label>
-        <input class="input" id="f-eng" value="${esc(d.eng || '')}"></div>
-      <div class="field"><label class="label">團內職位</label>
-        <select class="select" id="f-role">
-          ${['執委會主席', '副主席', '秘書', '司庫', '活動統籌', '文書', '隊長', '副隊長', '隊員']
-            .map(r => `<option ${d.role === r ? 'selected' : ''}>${r}</option>`).join('')}
-        </select></div>
-      <div class="field"><label class="label">狀態</label>
-        <select class="select" id="f-status">
-          ${Object.entries(STATUS).map(([k, v]) => `<option value="${k}" ${d.status === k ? 'selected' : ''}>${v.l}</option>`).join('')}
-        </select></div>
-      <div class="field"><label class="label">電話</label>
-        <input class="input" id="f-phone" value="${esc(d.phone || '')}" placeholder="9123 4567"></div>
-      <div class="field"><label class="label">電郵</label>
-        <input class="input" id="f-email" value="${esc(d.email || '')}"></div>
-      <div class="field"><label class="label">入團日期</label>
-        <input class="input" type="date" id="f-join" value="${esc(d.join || '')}"></div>
-      <div class="field"><label class="label">標籤（逗號分隔）</label>
-        <input class="input" id="f-tags" value="${esc((d.tags || []).join(', '))}" placeholder="執委會, 小隊"></div>
-      <div class="field" style="grid-column:1/-1"><label class="label">備註</label>
-        <textarea class="textarea" id="f-note">${esc(d.note || '')}</textarea></div>
-    </div>
-    <div class="row gap-8 mt-24" style="justify-content:flex-end">
-      <button class="btn" data-go="#/members">取消</button>
-      <button class="btn btn-primary" data-act="save">${icon('save', 16)} 儲存</button>
+  ${pageHead({ title: m ? `編輯：${m.name}` : '新增團員',
+    sub: '生日可以只填月日（例：03-26），亦可以填完整日期（例：2010-03-26）',
+    actions: `<button class="btn btn-sm" data-act="cancel">${icon('chevronL', 15)} 取消</button>` })}
+  <div class="card" style="max-width:760px">
+    <div style="padding:20px">
+      <div class="grid g-2" style="gap:14px">
+        <div class="field"><label class="label">姓名 <span class="req">*</span></label>
+          <input class="input" id="f-name" value="${esc(m?.name || '')}" placeholder="例：陳大文"></div>
+        <div class="field"><label class="label">英文名</label>
+          <input class="input" id="f-eng" value="${esc(m?.eng || '')}" placeholder="例：Chan Tai Man"></div>
+        <div class="field"><label class="label">出生日期（生日）</label>
+          <input class="input" id="f-birthday" value="${esc(m?.birthday || '')}" placeholder="YYYY-MM-DD 或 MM-DD">
+          <div class="hint">用嚟做生日提示同生日表；未確定年份可以只填 MM-DD。</div></div>
+        <div class="field"><label class="label">職位</label>
+          <input class="input" id="f-role" value="${esc(m?.role || '')}" placeholder="例：主席 / 司庫 / 隊員"></div>
+        <div class="field"><label class="label">電話</label>
+          <input class="input" id="f-phone" value="${esc(m?.phone || '')}" placeholder="9xxx xxxx"></div>
+        <div class="field"><label class="label">電郵</label>
+          <input class="input" id="f-email" value="${esc(m?.email || '')}"></div>
+        <div class="field"><label class="label">入團日期</label>
+          <input class="input" id="f-join" value="${esc(m?.join || '')}" placeholder="YYYY-MM-DD"></div>
+        <div class="field"><label class="label">狀態</label>
+          <select class="select" id="f-status">
+            ${Object.entries(memberStatus()).map(([k, v]) => `<option value="${k}" ${m?.status === k ? 'selected' : ''}>${v.l}</option>`).join('')}
+          </select></div>
+        <div class="field"><label class="label">標籤（用逗號分隔）</label>
+          <input class="input" id="f-tags" value="${esc((m?.tags || []).join(', '))}" placeholder="執委會, 小隊"></div>
+      </div>
+      <div class="field mt-16"><label class="label">備註</label>
+        <textarea class="textarea" id="f-note">${esc(m?.note || '')}</textarea></div>
+      <div id="f-err" class="err mt-8"></div>
+      <button class="btn btn-primary mt-16" data-act="save" data-id="${id || ''}">${icon('save', 16)} ${m ? '儲存' : '新增團員'}</button>
     </div>
   </div>`;
 }
 
 /* ============================================================
-   MOUNT
+   輸出
    ============================================================ */
-export function mount(root, params) {
-  const id = params.id && params.id !== 'new' ? params.id : null;
+function exportRosterCSV() {
+  const headers = ['姓名', '英文名', '職位', '生日', '年齡', '電話', '電郵', '入團日期', '狀態', '標籤', '備註'];
+  const rows = members().map(m => [
+    m.name, m.eng || '', m.role || '', m.birthday || '', ageFrom(m.birthday) ?? '',
+    m.phone || '', m.email || '', m.join || '', memberStatus()[m.status]?.l || m.status,
+    (m.tags || []).join(' '), m.note || ''
+  ]);
+  toCSV({ filename: `團員名冊_${stamp()}.csv`, headers, rows });
+}
 
+function rosterWord() {
+  const rows = members().map(m => `<tr>
+    <td>${esc(m.name)}</td><td>${esc(m.role || '')}</td>
+    <td>${esc(m.birthday || '')}</td><td class="num">${ageFrom(m.birthday) ?? ''}</td>
+    <td>${esc(m.phone || '')}</td><td>${esc(m.join || '')}</td>
+    <td>${esc(memberStatus()[m.status]?.l || '')}</td></tr>`).join('');
+  toWord({
+    filename: `團員名冊_${stamp()}.doc`,
+    title: '團員名冊',
+    org: profile().name,
+    bodyHtml: `<div class="doc-head"><div class="doc-title">團員名冊</div>
+      <div class="doc-sub">${esc(profile().name || '')} · 共 ${members().length} 人 · 列印日期 ${todayISO()}</div></div>
+      <table><thead><tr><th>姓名</th><th>職位</th><th>出生日期</th><th class="num">年齡</th><th>電話</th><th>入團</th><th>狀態</th></tr></thead>
+      <tbody>${rows}</tbody></table>`
+  });
+}
+
+function birthdayTableHtml(title = '團員生日表') {
+  const monthNames = ['一月', '二月', '三月', '四月', '五月', '六月', '七月', '八月', '九月', '十月', '十一月', '十二月'];
+  const all = birthdayList();
+  return `
+  <div class="doc-head"><div class="doc-title">${esc(title)}</div>
+    <div class="doc-sub">${esc(profile().name || '')} · 更新日期 ${todayISO()}</div></div>
+  <table>
+    <thead><tr><th style="width:70pt">月份</th><th>團員</th><th style="width:70pt" class="num">日期</th><th style="width:56pt" class="num">將滿</th></tr></thead>
+    <tbody>
+      ${monthNames.map((n, i) => {
+        const rows = birthdaysThisMonth(i + 1);
+        if (!rows.length) return '';
+        return `<tr><td>${n}</td>
+          <td>${rows.map(x => esc(x.name) + (x.member.role ? `（${esc(x.member.role)}）` : '')).join('、')}</td>
+          <td class="num">${rows.map(x => `${Number(x.md.slice(0, 2))}/${Number(x.md.slice(3))}`).join('<br>')}</td>
+          <td class="num">${rows.map(x => turningAge(x.member.birthday) ?? '—').join('<br>')}</td></tr>`;
+      }).join('')}
+    </tbody>
+  </table>
+  <p class="note">提示：生日前 ${settings().birthday?.remindDaysBefore || 7} 日系統會自動提醒。${all.filter(x => !parseBirthday(x.member.birthday)?.hasYear).length ? '部分團員未填出生年份，年齡欄以「—」顯示。' : ''}</p>`;
+}
+
+function exportBirthdayWord() {
+  toWord({ filename: `團員生日表_${stamp()}.doc`, title: '團員生日表', org: profile().name, bodyHtml: birthdayTableHtml() });
+}
+function exportBirthdayPdf() {
+  printDoc({ title: '團員生日表', org: profile().name, bodyHtml: birthdayTableHtml() });
+}
+function exportBirthdayCSV() {
+  toCSV({
+    filename: `團員生日表_${stamp()}.csv`,
+    headers: ['月份', '姓名', '生日', '出生年份', '將滿歲數', '職位', '電話'],
+    rows: birthdayList().map(x => [
+      Number(x.md.slice(0, 2)), x.name, x.md, parseBirthday(x.birthday).hasYear ? parseBirthday(x.birthday).y : '',
+      turningAge(x.member.birthday) ?? '', x.member.role || '', x.member.phone || ''
+    ])
+  });
+}
+/** 匯出 .ics（可加入 Google Calendar / iPhone 日曆，每年重複） */
+function exportBirthdayIcs() {
+  const y = new Date().getFullYear();
+  const lines = [
+    'BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//82venture//Birthdays//ZH-HK', 'CALSCALE:GREGORIAN'
+  ];
+  birthdayList().forEach(x => {
+    const p = parseBirthday(x.birthday);
+    const start = `${y}${String(p.m).padStart(2, '0')}${String(p.d).padStart(2, '0')}`;
+    lines.push('BEGIN:VEVENT',
+      `UID:${x.id}-birthday@82venture`,
+      `DTSTAMP:${new Date().toISOString().replace(/[-:.]/g, '').slice(0, 15)}Z`,
+      `DTSTART;VALUE=DATE:${start}`,
+      'DURATION:P1D',
+      'RRULE:FREQ=YEARLY',
+      `SUMMARY:${x.name} 生日 🎂`,
+      `DESCRIPTION:${profile().name || ''} 團員生日`,
+      'TRANSP:TRANSPARENT',
+      'END:VEVENT');
+  });
+  lines.push('END:VCALENDAR');
+  dlFile(`團員生日_${stamp()}.ics`, lines.join('\r\n'), 'text/calendar;charset=utf-8');
+}
+
+/* ============================================================
+   mount
+   ============================================================ */
+export function mount(root) {
   root.querySelectorAll('[data-go]').forEach(el => el.addEventListener('click', () => go(el.dataset.go)));
-  root.querySelectorAll('[data-open]').forEach(el => el.addEventListener('click', () => go('#/members/' + el.dataset.open)));
-  root.querySelectorAll('[data-status]').forEach(el => el.addEventListener('click', () => { statusFilter = el.dataset.status; refresh(); }));
-  root.querySelectorAll('[data-tag]').forEach(el => el.addEventListener('click', () => { tagFilter = el.dataset.tag; refresh(); }));
 
-  const search = root.querySelector('#mSearch');
-  if (search) search.addEventListener('input', () => { kw = search.value; refresh(search.value); });
+  root.querySelectorAll('[data-status]').forEach(b => b.addEventListener('click', () => { statusFilter = b.dataset.status; refresh(); }));
+  root.querySelectorAll('[data-month]').forEach(b => b.addEventListener('click', () => { bdayMonth = Number(b.dataset.month); refresh(); }));
+  const s = root.querySelector('#mSearch');
+  if (s) {
+    s.addEventListener('input', () => { kw = s.value; clearTimeout(s._t); s._t = setTimeout(() => { const p = s.selectionStart; refresh(); const n = document.querySelector('#mSearch'); if (n) { n.focus(); n.setSelectionRange(p, p); } }, 220); });
+  }
+  root.querySelectorAll('[data-open]').forEach(el => el.addEventListener('click', e => {
+    if (e.target.closest('button')) return;
+    go('#/members/' + el.dataset.open);
+  }));
 
-  root.querySelectorAll('[data-act]').forEach(btn => btn.addEventListener('click', async () => {
-    const act = btn.dataset.act;
+  root.querySelectorAll('[data-act]').forEach(el => el.addEventListener('click', async () => {
+    const act = el.dataset.act;
+    const id = el.dataset.id;
 
     if (act === 'new') return go('#/members/new');
+    if (act === 'edit') return go('#/members/' + id);
+    if (act === 'cancel') return go('#/members');
+    if (act === 'exp-csv') { exportRosterCSV(); toast('已匯出 CSV', 'ok'); }
+    if (act === 'exp-word') { rosterWord(); toast('已輸出 Word（.doc）', 'ok'); }
+    if (act === 'exp-bday') return go('#/members/birthdays');
+    if (act === 'exp-bday-word') { exportBirthdayWord(); toast('已輸出 Word', 'ok'); }
+    if (act === 'exp-bday-pdf') { exportBirthdayPdf(); toast('已開啟列印，可另存為 PDF', 'ok'); }
+    if (act === 'exp-bday-csv') { exportBirthdayCSV(); toast('已匯出 CSV', 'ok'); }
+    if (act === 'exp-bday-ics') { exportBirthdayIcs(); toast('已匯出 .ics 日曆檔', 'ok'); }
 
-    if (act === 'export') {
-      const head = ['姓名', '英文姓名', '職位', '電話', '電郵', '入團日期', '狀態', '出席率', '標籤'];
-      const rows = members().map(m => [m.name, m.eng, m.role, m.phone, m.email, m.join,
-        STATUS[m.status]?.l || m.status, attendanceStats(m.id).rate + '%', (m.tags || []).join(' / ')]);
-      const csv = '﻿' + [head, ...rows].map(r => r.map(c => `"${String(c ?? '').replace(/"/g, '""')}"`).join(',')).join('\r\n');
-      download(`82venture_團員名冊_${todayISO()}.csv`, csv, 'text/csv;charset=utf-8');
-      toast('已匯出團員名冊', 'ok');
+    if (act === 'save') {
+      const v = k => root.querySelector(k)?.value.trim() || '';
+      const name = v('#f-name');
+      const birthday = v('#f-birthday');
+      const err = root.querySelector('#f-err');
+      if (!name) { err.textContent = '請填姓名'; err.style.display = 'block'; return; }
+      if (!isValidBirthday(birthday)) { err.textContent = '生日格式唔正確（例：2010-03-26 或 03-26）'; err.style.display = 'block'; return; }
+      const patch = {
+        name, birthday, eng: v('#f-eng'), role: v('#f-role'), phone: v('#f-phone'), email: v('#f-email'),
+        join: v('#f-join'), status: root.querySelector('#f-status').value,
+        tags: v('#f-tags').split(',').map(x => x.trim()).filter(Boolean), note: v('#f-note')
+      };
+      if (id) { update('members', id, patch); toast('已更新團員資料', 'ok'); }
+      else { const rec = add('members', { ...patch, id: uid('m') }); toast('已新增團員', 'ok'); }
+      go('#/members');
     }
 
-    if (!id) return;
-    const m = member(id);
-    if (!m) return;
-
-    if (act === 'edit') go('#/members/' + id + '/edit');
-
-    if (act === 'copy-contact') {
-      if (await copyText(`${m.name}　${m.role}\n電話：${m.phone || '—'}\n電郵：${m.email || '—'}`)) toast('已複製聯絡資料', 'ok');
+    if (act === 'save-note') {
+      update('members', id, { note: root.querySelector('#noteBox').value });
+      toast('備註已儲存', 'ok'); refresh();
     }
 
-    if (act === 'edit-note') {
-      const r = await modal({
-        title: '領袖備註', sub: m.name,
-        body: `<div class="field"><label class="label">內容</label>
-          <textarea class="textarea" id="q-note" style="min-height:150px">${esc(m.note || '')}</textarea>
-          <div class="hint">只限領袖同超管可見；如想團員本人睇到，請喺進度系統填寫。</div></div>`,
-        actions: [{ label: '取消', class: 'btn', value: null },
-          { label: '儲存', class: 'btn-primary', onClick: el => el.querySelector('#q-note').value }]
-      });
-      if (r !== null && r !== undefined) { update('members', id, { note: r }); toast('備註已儲存', 'ok'); refresh(); }
+    if (act === 'mark-fee') {
+      update('fees', id, { paid: true, paidDate: todayISO(), method: '（由團員頁標記）' });
+      toast('已標記收款', 'ok'); refresh();
     }
 
     if (act === 'del') {
-      if (await confirmDlg({ title: '刪除團員', danger: true, okText: '確定刪除',
-        message: `確定刪除「<b>${esc(m.name)}</b>」？<br><span class="muted">相關收費記錄會保留，但團員資料會刪除。</span>` })) {
-        remove('members', id); toast('已刪除'); go('#/members');
-      }
-    }
-
-    if (act === 'save') {
-      const v = s => root.querySelector(s)?.value ?? '';
-      const name = v('#f-name').trim();
-      if (!name) { toast('請填寫姓名', 'err'); return; }
-      const payload = {
-        name, eng: v('#f-eng').trim(), role: v('#f-role'), status: v('#f-status'),
-        phone: v('#f-phone').trim(), email: v('#f-email').trim(), join: v('#f-join'),
-        tags: v('#f-tags').split(/[,，]/).map(x => x.trim()).filter(Boolean),
-        note: v('#f-note')
-      };
-      if (m) { update('members', id, payload); toast('資料已更新', 'ok'); go('#/members/' + id); }
-      else { const nm = add('members', { id: uid('m'), ...payload }); toast('團員已新增', 'ok'); go('#/members/' + nm.id); }
+      const m = member(id);
+      if (await confirmDlg({
+        title: '刪除團員', danger: true, okText: '確定刪除',
+        message: `確定刪除 <b>${esc(m?.name || '')}</b>？佢嘅出席紀錄會保留但名字會顯示為「—」。`
+      })) { remove('members', id); toast('已刪除', 'ok'); go('#/members'); }
     }
   }));
 }
 
-export function refresh(keepSearch) {
-  window.dispatchEvent(new CustomEvent('v82:refresh', { detail: { keepSearch } }));
-}
+export function refresh() { window.dispatchEvent(new CustomEvent('v82:refresh')); }

@@ -1,0 +1,15 @@
+# 開發／測試用（網站本身零依賴）
+node_modules
+node_modules/
+package-lock.json
+npm-debug.log*
+
+# 系統檔案
+.DS_Store
+Thumbs.db
+*.log
+
+# 本機設定／暫存
+*.local
+.env
+_scratch/

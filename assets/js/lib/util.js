@@ -140,6 +140,14 @@ const P = {
   clock:     '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>',
   user:      '<circle cx="12" cy="8" r="4"/><path d="M4.5 20.5a7.5 7.5 0 0 1 15 0"/>',
   upload:    '<path d="M12 20V9"/><path d="m7.5 13.5 4.5-4.5 4.5 4.5"/><path d="M4.5 4.5h15"/>',
+  camera:    '<path d="M4 8.5h3l1.4-2h7.2l1.4 2h3v10H4z"/><circle cx="12" cy="13.2" r="3.2"/>',
+  image:     '<rect x="3.5" y="4.5" width="17" height="15" rx="2"/><circle cx="9" cy="10" r="1.6"/><path d="m5 18 5-5 3 3 2.5-2.5L20 18"/>',
+  link:      '<path d="M10 14a4 4 0 0 1 0-5.6l2.4-2.4a4 4 0 1 1 5.6 5.6L16.6 13"/><path d="M14 10a4 4 0 0 1 0 5.6l-2.4 2.4a4 4 0 1 1-5.6-5.6L7.4 11"/>',
+  share:     '<path d="M12 15V4"/><path d="m8 7.5 4-3.5 4 3.5"/><path d="M5 13v6.5h14V13"/>',
+  send:      '<path d="M4 12 20 5l-6.5 15-2.8-6.2z"/>',
+  megaphone: '<path d="M4 10.5v3l12 5V5.5z"/><path d="M16 8.5a3.5 3.5 0 0 1 0 7"/><path d="M7 14v5"/>',
+  table:     '<rect x="3.5" y="4.5" width="17" height="15" rx="2"/><path d="M3.5 9.5h17M9.5 9.5V19.5M3.5 14.5h17"/>',
+  cloud:     '<path d="M7 18h10a4 4 0 0 0 .5-8 5.5 5.5 0 0 0-10.6 1.4A3.6 3.6 0 0 0 7 18z"/>',
   filter:    '<path d="M3.5 5.5h17l-6.6 7.6V20l-3.8-2.2v-5.7z"/>',
   key:       '<circle cx="8" cy="15" r="4"/><path d="m11 12 8.5-8.5"/><path d="m16.5 7 2 2"/><path d="m14 9.5 2 2"/>',
   copy:      '<rect x="8.5" y="8.5" width="11.5" height="11.5" rx="2"/><path d="M15.5 5.5H6a2 2 0 0 0-2 2v9.5"/>',
@@ -271,3 +279,72 @@ export function sortBy(list, keyFn, dir = 1) {
   });
 }
 export function num(v) { return Number(String(v ?? '').replace(/[^0-9.\-]/g, '')) || 0; }
+
+/* ---------- 小元件 ---------- */
+export function badge(label, cls = 'b-grey', dot = false) {
+  return `<span class="badge ${cls}">${dot ? '<span class="dot"></span>' : ''}${esc(label)}</span>`;
+}
+export function nf(n, digits = 0) {
+  return (Number(n) || 0).toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits });
+}
+export function pct(part, whole) {
+  const w = Number(whole) || 0;
+  return w ? Math.round((Number(part) || 0) / w * 100) : 0;
+}
+/** 純文字（用嚟做 CSV／剪貼） */
+export function plain(s) {
+  return String(s ?? '').replace(/<[^>]*>/g, '');
+}
+/** 由元素下載 SVG（QR 等） */
+export function downloadSvgEl(el, filename = 'qrcode.svg') {
+  if (!el) return false;
+  const svg = el.querySelector('svg') || el;
+  const text = '<?xml version="1.0" encoding="UTF-8"?>' + new XMLSerializer().serializeToString(svg);
+  download(filename, text, 'image/svg+xml;charset=utf-8');
+  return true;
+}
+
+/* ---------- 相片檢視（lightbox） ---------- */
+export function photoViewer(photos, index = 0) {
+  const list = (photos || []).filter(p => p?.dataUrl);
+  if (!list.length) return;
+  let i = Math.max(0, Math.min(index, list.length - 1));
+  const el = document.createElement('div');
+  el.className = 'overlay lightbox';
+  const paint = () => {
+    const p = list[i];
+    el.innerHTML = `
+      <div class="lb-box">
+        <div class="lb-head">
+          <div class="sm">${esc(p.name || '')} <span class="faint">（${i + 1} / ${list.length}）</span></div>
+          <div class="row gap-6">
+            <button class="btn btn-xs" data-act="dl">${icon('download', 13)} 下載</button>
+            <button class="btn btn-xs btn-ghost" data-act="close">${icon('x', 16)}</button>
+          </div>
+        </div>
+        <div class="lb-body">
+          ${list.length > 1 ? `<button class="lb-nav" data-act="prev">${icon('chevronL', 22)}</button>` : ''}
+          <img src="${p.dataUrl}" alt="${esc(p.name || '')}">
+          ${list.length > 1 ? `<button class="lb-nav right" data-act="next">${icon('chevronR', 22)}</button>` : ''}
+        </div>
+      </div>`;
+  };
+  paint();
+  const close = () => el.remove();
+  el.addEventListener('click', e => {
+    if (e.target === el) return close();
+    const b = e.target.closest('[data-act]');
+    if (!b) return;
+    const a = b.dataset.act;
+    if (a === 'close') close();
+    if (a === 'prev') { i = (i - 1 + list.length) % list.length; paint(); }
+    if (a === 'next') { i = (i + 1) % list.length; paint(); }
+    if (a === 'dl') {
+      const p = list[i];
+      const link = document.createElement('a');
+      link.href = p.dataUrl; link.download = p.name || 'photo.jpg';
+      document.body.appendChild(link); link.click(); link.remove();
+    }
+  });
+  document.body.appendChild(el);
+}

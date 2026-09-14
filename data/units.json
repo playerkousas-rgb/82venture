@@ -1,0 +1,53 @@
+{
+  "schema": 2,
+  "updated": "2026-09-14",
+  "_comment": "旅團 Registry —— 多旅團平台嘅唯一註冊處。新增旅團：加一個 key（旅團編號）+ 建立 data/units/<編號>/ 資料夾（unit.json / constitution.json / members.json / inventory.json / finance.json）。詳見 docs/ADD_NEW_UNIT.md",
+  "defaultUnit": "0082",
+  "units": {
+    "0082": {
+      "code": "0082",
+      "name": "第八十二旅深資童軍團",
+      "nameEn": "82nd Hong Kong Group Venture Scout Unit",
+      "short": "82venture",
+      "section": "深資童軍",
+      "region": "港島地域",
+      "sponsor": "香港小童群益會康山兒童中心",
+      "address": "香港鰂魚涌康山花園第二至三座地下",
+      "dataPath": "data/units/0082/",
+      "theme": {
+        "brand700": "#7B2233",
+        "brand800": "#5E1826",
+        "brand900": "#4A111C",
+        "brand600": "#93293D",
+        "brand50": "#FBF1F3",
+        "brand100": "#F2DCE1"
+      },
+      "progress": {
+        "name": "深資童軍進度及行政平台 (VSBADGE)",
+        "url": "https://script.google.com/macros/s/AKfycbxqQ3JnEdSRnxlhoSEasa6-wX5F58p3dMqBiQRj1zg-SDn7YtFLBKykN5LiWcadgRdCBg/exec",
+        "mode": "portal",
+        "portal": {
+          "unitParam": "0082",
+          "role": "exec_committee",
+          "ymis": "",
+          "extraParams": "embed=1"
+        }
+      },
+      "backend": {
+        "gasUrl": "https://script.google.com/macros/s/AKfycbySGLBg5KuWzgM9EySiOIppqnzrL0QASIYLlhbCIHocGHcLHKbkMdvmhJvam3baG___/exec",
+        "apiKey": ""
+      },
+      "notice": {
+        "submitUrl": "https://script.google.com/macros/s/AKfycbySGLBg5KuWzgM9EySiOIppqnzrL0QASIYLlhbCIHocGHcLHKbkMdvmhJvam3baG___/exec",
+        "_howto": "公開通告頁（notice.html）收到嘅報名會 POST 去呢個 Apps Script。"
+      }
+    }
+  },
+  "backend": {
+    "name": "82venture 總表（Apps Script Web App）",
+    "gasUrl": "https://script.google.com/macros/s/AKfycbySGLBg5KuWzgM9EySiOIppqnzrL0QASIYLlhbCIHocGHcLHKbkMdvmhJvam3baG___/exec",
+    "apiKey": "",
+    "_howto": "所有旅團預設寫入呢一個後端（同一張總 Sheet 統管整個 Venture）：總表同步、成員手機記帳、通告報名全部用同一條 /exec。個別旅團要分開嘅話，喺自己嘅 registry entry 加 \"backend\": { \"gasUrl\": \"…\" } 覆蓋。",
+    "updated": "2026-09-14"
+  }
+}
