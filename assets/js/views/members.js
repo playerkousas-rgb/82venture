@@ -2,11 +2,11 @@
    members.js — 團員名冊、個人紀錄、生日表（可改、可輸出）
    ============================================================ */
 
-import { collection, find, add, update, remove, commit, load } from '../lib/store.js';
+import { collection, find, add, update, remove, commit, load, newSystemId } from '../lib/store.js';
 import {
   members, member, memberName, attendanceStats, fees, memberStatus, memberBirthdayText,
   birthdayList, birthdaysThisMonth, birthdaysWithin, birthdaySummary, money, settings, profile,
-  IDENTITIES, identityLabel, identityOf, guessIdentity
+  IDENTITIES, identityLabel, identityOf, guessIdentity, keyCoverage, memberKey
 } from '../lib/model.js';
 import {
   bindDraftAutosave, readDraft, applyDraft, clearDraft, draftBanner, confirmDanger, undoable
@@ -68,6 +68,15 @@ function listView() {
     呢度係<b>用戶名冊</b> —— 領袖、執委同團員都會列喺呢度。
     每一行都可以撳「<b>編輯</b>」改資料同<b>身份</b>（領袖 / 執委 / 團員）。
     <div class="xs faint mt-4">改動會先暫存喺呢部裝置，撳「儲存」先寫入；撳「同步」先送去總表。</div></div></div>
+
+  ${(() => {
+    const kc = keyCoverage(all);
+    if (!kc.total || kc.ymisPercent === 100) return '';
+    return `<div class="note-box ${kc.withYmis ? '' : 'warn'} mb-16">${icon('alert', 15)}<div>
+      <b>會籍編號（YMIS）覆蓋率 ${kc.ymisPercent}%</b>（${kc.withYmis}／${kc.total} 位已填）。
+      <div class="xs">進度追蹤係<b>獨立系統</b>，兩邊要靠 YMIS 先可以準確認到同一個人；
+      未填嘅只可以用姓名配對（會撞名、會漏）。撳「編輯」逐個補返，或者由總表匯入。</div></div></div>`;
+  })()}
 
   <div class="grid g-3 mb-16">
     <div class="card" style="cursor:pointer" data-go="#/members/birthdays">
@@ -248,6 +257,8 @@ function detail(id) {
             ['姓名', `<b>${esc(m.name)}</b>`],
             ['身份', `<span class="badge ${IDENTITIES[identityOf(m)].c}"><span class="dot"></span>${esc(identityLabel(m))}</span>`],
             ['英文名', esc(m.eng || '—')],
+            ['會籍編號（YMIS）', m.ymis ? `<span class="semibold" style="font-family:var(--mono)">${esc(m.ymis)}</span> <span class="tag brand">可對應進度系統</span>` : '<span class="faint">未填 —— 進度系統只可以用姓名／系統 ID 配對</span>'],
+            ['系統 ID', `<span class="xs faint" style="font-family:var(--mono)">${esc(m.systemId || '—')}</span>`],
             ['生日', `${esc(memberBirthdayText(m))}${ageFrom(m.birthday) !== null ? ` · ${ageFrom(m.birthday)} 歲` : ''}`],
             ['職位', esc(m.role || '—')],
             ['聯絡電話', esc(m.phone || '—')],
@@ -340,6 +351,12 @@ function editor(id) {
           <div class="hint">領袖 / 執委 / 團員 —— 決定佢喺系統入面嘅身份。</div></div>
         <div class="field"><label class="label">英文名</label>
           <input class="input" id="f-eng" data-draft="eng" value="${esc(m?.eng || '')}" placeholder="例：Chan Tai Man"></div>
+        <div class="field"><label class="label">會籍編號（YMIS）</label>
+          <input class="input" id="f-ymis" data-draft="ymis" value="${esc(m?.ymis || '')}" placeholder="同進度追蹤系統一樣嗰個">
+          <div class="hint">跨系統對人用嘅<b>權威 key</b>。填咗，進度追蹤等外部系統先可以準確認到呢個人（唔使靠姓名）。</div></div>
+        <div class="field"><label class="label">系統 ID（自動產生，唔好改）</label>
+          <input class="input" value="${esc(m?.systemId || '（儲存時自動產生）')}" readonly style="font-family:var(--mono);font-size:12px;background:var(--bg-2)">
+          <div class="hint">冇 YMIS 時嘅 fallback；一旦產生就唔會再改。</div></div>
         <div class="field"><label class="label">職位（團內）</label>
           <input class="input" id="f-role" data-draft="role" value="${esc(m?.role || '')}" placeholder="例：主席 / 司庫 / 小隊長"></div>
         <div class="field"><label class="label">出生日期（生日）</label>
@@ -528,6 +545,7 @@ export function mount(root, params = {}) {
       const identity = root.querySelector('#f-identity')?.value || 'member';
       const patch = {
         name, birthday, identity, eng: v('#f-eng'), role: v('#f-role'), phone: v('#f-phone'), email: v('#f-email'),
+        ymis: v('#f-ymis'),
         join: v('#f-join'), status: root.querySelector('#f-status').value,
         tags: v('#f-tags').split(',').map(x => x.trim()).filter(Boolean), note: v('#f-note')
       };
@@ -546,7 +564,8 @@ export function mount(root, params = {}) {
         undoable('（可以撳「還原」復原今次改動）', () => { update('members', id, before); refresh(); });
         go('#/members/' + id);
       } else {
-        const rec = add('members', { ...patch, id: uid('m') });
+        const nid = uid('m');
+        const rec = add('members', { ...patch, id: nid, systemId: newSystemId(load().unitCode, nid) });
         clearDraft('member', 'new');
         toast(`已新增 ${name}（${IDENTITIES[identity].l}）`, 'ok');
         go('#/members/' + rec.id);

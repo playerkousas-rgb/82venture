@@ -121,6 +121,41 @@ export function members() { return collection('members'); }
 export function member(id) { return find('members', id); }
 export function memberName(id) { return member(id)?.name || '—'; }
 export function activeMembers() { return members().filter(m => m.status !== 'alumni'); }
+
+/* ---------- 跨系統身份 key（同進度追蹤等外部系統對人用） ----------
+   ymis      會籍編號／YMIS —— 權威 key，同對面系統一樣
+   systemId  本系統派嘅穩定 ID —— 冇 YMIS 時嘅 fallback
+   冇 key 就只可以靠姓名配對（會撞名、會漏），所以呢度會報告覆蓋率。 */
+
+/** 用戶嘅跨系統 key（YMIS 優先） */
+export function memberKey(m) {
+  const y = String(m?.ymis || '').trim();
+  if (y) return { key: y, kind: 'ymis' };
+  const sys = String(m?.systemId || '').trim();
+  if (sys) return { key: sys, kind: 'systemId' };
+  return { key: '', kind: '' };
+}
+/** 名冊嘅身份 key 覆蓋率（federation 就緒程度） */
+export function keyCoverage(list = members()) {
+  const total = list.length;
+  const withYmis = list.filter(m => String(m.ymis || '').trim()).length;
+  const withSys = list.filter(m => String(m.systemId || '').trim()).length;
+  return {
+    total, withYmis, withSystemId: withSys,
+    missing: list.filter(m => !memberKey(m).key).length,
+    /** 全部人都至少有一個 key 先算 ready */
+    ready: total > 0 && withSys === total,
+    /** YMIS 覆蓋率（同對面系統真正對得上嘅比例） */
+    ymisPercent: total ? Math.round((withYmis / total) * 100) : 0
+  };
+}
+/** 用 key 搵人（YMIS 或 systemId） */
+export function findByKey(key) {
+  const k = String(key || '').trim();
+  if (!k) return null;
+  return members().find(m => String(m.ymis || '').trim() === k
+    || String(m.systemId || '').trim() === k) || null;
+}
 export function memberStatus() {
   return { active: { l: '現役', c: 'b-ok' }, leave: { l: '休假', c: 'b-warn' }, alumni: { l: '舊團員', c: 'b-grey' } };
 }

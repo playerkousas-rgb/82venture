@@ -1331,6 +1331,84 @@ console.log('\n▌期初結餘遷移（8,803.28 係 2025-26 嘅期初，唔係 2
   ok('全域係 0 就唔使搬', store.migrateOpeningBalances(mk(0)) === false);
 }
 
+/* ---------- 跨系統身份 key（federation L1） ---------- */
+console.log('\n▌跨系統身份 key（進度追蹤係獨立系統，要靠 key 對人）');
+{
+  const db4 = store.load();
+  const ms = db4.members;
+  ok('所有用戶都有 systemId（自動產生）',
+    ms.every(m => !!m.systemId), `缺 ${ms.filter(m => !m.systemId).length} 個`);
+  ok('systemId 全部唔重複',
+    new Set(ms.map(m => m.systemId)).size === ms.length, String(new Set(ms.map(m => m.systemId)).size));
+  ok('所有用戶都有 ymis 欄（未填都要有呢個欄）',
+    ms.every(m => 'ymis' in m), String(ms.filter(m => !('ymis' in m)).length));
+
+  const first = ms[0];
+  const before = first.systemId;
+  store.migrateMemberKeys(db4);
+  ok('migrateMemberKeys 唔會改已有 systemId（key 必須穩定）', first.systemId === before, first.systemId);
+  ok('migrateMemberKeys 第二次跑係 no-op', store.migrateMemberKeys(db4) === false);
+  /* systemId 必須係確定性：另一部裝置獨立跑遷移都要得到同一個 key，
+     否則呢個 key 永遠對唔上，做唔到跨系統配對 */
+  const clone = JSON.parse(JSON.stringify({ unitCode: db4.unitCode, members: ms.map(m => ({ id: m.id })) }));
+  store.migrateMemberKeys(clone);
+  ok('systemId 係確定性（唔同裝置都推斷到同一個）',
+    clone.members.every((m, i) => m.systemId === ms[i].systemId),
+    `${clone.members[0].systemId} vs ${ms[0].systemId}`);
+  ok('systemId 格式 = 旅團編號-用戶 id',
+    ms.every(m => m.systemId === `${db4.unitCode}-${m.id}`), ms[0].systemId);
+
+  const kc0 = model.keyCoverage(ms);
+  ok('keyCoverage 統計到 YMIS 覆蓋率',
+    kc0.total === ms.length && kc0.withSystemId === ms.length, JSON.stringify(kc0));
+  ok('冇 YMIS 時 memberKey fallback 去 systemId',
+    model.memberKey({ systemId: 'abc' }).kind === 'systemId' && model.memberKey({ systemId: 'abc' }).key === 'abc');
+  ok('有 YMIS 時 memberKey 優先用 YMIS',
+    model.memberKey({ ymis: 'Y123', systemId: 'abc' }).kind === 'ymis');
+  ok('乜都冇 → key 係空', model.memberKey({}).key === '');
+
+  const keepY = first.ymis;
+  first.ymis = 'TEST-YMIS-1';
+  store.commit();
+  ok('findByKey 用 YMIS 搵到人', model.findByKey('TEST-YMIS-1')?.id === first.id);
+  ok('findByKey 用 systemId 搵到人', model.findByKey(first.systemId)?.id === first.id);
+  ok('findByKey 搵唔到會回 null', model.findByKey('NO-SUCH-KEY') === null);
+  ok('YMIS 覆蓋率跟實際填入數一致',
+    model.keyCoverage(store.load().members).withYmis === 1, String(model.keyCoverage(store.load().members).withYmis));
+  first.ymis = keepY;
+  store.commit();
+
+  /* UI：用戶編輯頁要有 YMIS 欄 */
+  window.location.hash = '#/members/edit/' + first.id;
+  window.dispatchEvent(new window.HashChangeEvent('hashchange'));
+  await new Promise(r => setTimeout(r, 80));
+  const mv = doc.getElementById('view');
+  ok('用戶編輯頁有「會籍編號（YMIS）」欄', !!mv.querySelector('#f-ymis'));
+  ok('用戶編輯頁顯示系統 ID（唯讀）',
+    /系統 ID/.test(mv.textContent) && !!Array.from(mv.querySelectorAll('input[readonly]')).length);
+
+  window.location.hash = '#/members';
+  window.dispatchEvent(new window.HashChangeEvent('hashchange'));
+  await new Promise(r => setTimeout(r, 80));
+  ok('用戶列表有 YMIS 覆蓋率提示',
+    /會籍編號（YMIS）覆蓋率/.test(doc.getElementById('view').textContent));
+
+  window.location.hash = '#/progress';
+  window.dispatchEvent(new window.HashChangeEvent('hashchange'));
+  await new Promise(r => setTimeout(r, 80));
+  const pv = doc.getElementById('view').textContent;
+  ok('進度頁講明係聯邦式（進度資料由對面系統擁有）', /聯邦式/.test(pv) && /獨立系統/.test(pv));
+  ok('進度頁顯示 YMIS 覆蓋率', /會籍編號（YMIS）覆蓋率/.test(pv));
+  ok('進度頁分得開「連結就緒」同「身份對齊」', /連結狀態/.test(pv) && /資料可對應|身份未對齊/.test(pv));
+  ok('進度頁有去補 YMIS 嘅捷徑', !!doc.querySelector('[data-go="#/members"]'));
+
+  /* 總表要帶住 key，Sheet 先可以做 join */
+  const { gasTemplate } = await import('../assets/js/lib/gastemplate.js');
+  const gsCode = gasTemplate();
+  ok('Code.gs 團員表帶 ymis 欄', /'ymis'/.test(gsCode));
+  ok('Code.gs 團員表帶 systemId 欄', /'systemId'/.test(gsCode));
+}
+
 /* ---------- 總結 ---------- */
 const ms = Date.now() - t0;
 console.log(`\n──────── ${MODE.toUpperCase()} 測試結果：${pass} 通過 / ${fail} 失敗（${ms} ms）────────`);

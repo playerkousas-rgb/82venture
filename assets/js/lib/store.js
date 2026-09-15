@@ -120,6 +120,40 @@ export function migrateOpeningBalances(db) {
   return true;
 }
 
+/* ---------------- 跨系統身份（federation L1） ----------------
+   進度追蹤（VSBADGE）係獨立系統。兩邊要對得上同一個人，就要一個共同 key：
+     ymis      會籍編號／YMIS —— **權威** key（人手填，同對面系統一樣）
+     systemId  本系統派嘅穩定 ID —— 冇 YMIS 時嘅 fallback（一旦產生就唔會再改）
+   冇呢兩個 key，任何同步都只可以靠姓名配對（會撞名、會漏）。 */
+
+/**
+ * 產生穩定嘅系統 ID。
+ * **必須係確定性嘅** —— 如果用隨機值，每部裝置都會產生唔同嘅 ID，
+ * 咁呢個 key 就永遠對唔上，做唔到跨系統配對。所以用「旅團編號-用戶 id」推斷；
+ * 兩樣都冇先至退返去隨機（只適用於即時新增、仲未同步嘅紀錄）。
+ */
+export function newSystemId(unitCode = state.unitCode, memberId = '') {
+  if (unitCode && memberId) return `${unitCode}-${memberId}`;
+  const c = globalThis.crypto;
+  if (c?.randomUUID) return String(c.randomUUID());
+  const r = () => Math.floor(Math.random() * 0xffff).toString(16).padStart(4, '0');
+  return `${Date.now().toString(16)}-${r()}-${r()}-${r()}`;
+}
+
+/**
+ * 為所有用戶補上 systemId / ymis（已有就唔會改）。
+ * @returns {boolean} 有冇改動
+ */
+export function migrateMemberKeys(db) {
+  if (!db || !Array.isArray(db.members)) return false;
+  let changed = false;
+  db.members.forEach(m => {
+    if (!m.systemId) { m.systemId = newSystemId(db.unitCode, m.id); changed = true; }
+    if (m.ymis === undefined) { m.ymis = ''; changed = true; }
+  });
+  return changed;
+}
+
 /* ---------------- 種子資料 ---------------- */
 function blankDb(mode, code, entry = {}) {
   return {
@@ -266,6 +300,8 @@ export async function init(opts = {}) {
   }
   // 用戶名冊升級：舊資料冇「身份」欄 → 由職位／標籤推算（領袖 / 執委 / 團員）
   if (migrateIdentities(state.db)) persist();
+  // 跨系統身份 key（進度追蹤等外部系統要靠呢個對人）
+  if (migrateMemberKeys(state.db)) persist();
   // 期初結餘：舊嘅全域數字如果係上年度嘅期初，自動搬返去對應年度（見 migrateOpeningBalances）
   if (migrateOpeningBalances(state.db)) persist();
   // 後端設定升級：舊資料庫（未有 sync 設定）自動補上 Registry / unit.json 嘅 Apps Script 網址

@@ -8,7 +8,7 @@
    ============================================================ */
 
 import { load, commit, collection, setSetting } from '../lib/store.js';
-import { profile, settings, members, memberName } from '../lib/model.js';
+import { profile, settings, members, memberName, keyCoverage } from '../lib/model.js';
 import { esc, icon, modal, toast, copyText, qrSvg, downloadSvgEl } from '../lib/util.js';
 import { downloadQrSvg } from '../lib/exporter.js';
 import { go } from '../lib/router.js';
@@ -74,7 +74,14 @@ export function readiness() {
     { ok: !!buildUrl(c), label: '可以組合出登入連結', detail: buildUrl(c) || '（未有網址）' }
   ];
   const last = db.settings?.progressCheck || null;
-  return { checks, pass: checks.filter(x => x.ok).length, total: checks.length, ready: checks.every(x => x.ok), last, url: buildUrl(c) || c.url, name: c.name, mode: c.mode };
+  /* 連結通唔通 ≠ 資料對唔對得上。
+     進度追蹤係獨立系統，兩邊要靠會籍編號（YMIS）先可以準確認到同一個人。 */
+  const ident = keyCoverage();
+  return {
+    checks, pass: checks.filter(x => x.ok).length, total: checks.length,
+    ready: checks.every(x => x.ok), last, url: buildUrl(c) || c.url, name: c.name, mode: c.mode,
+    ident, linkReady: checks.every(x => x.ok), dataReady: ident.ready
+  };
 }
 
 /** 由瀏覽器實際 ping 一次（Apps Script 多數唔畀讀回應，所以只報告可達性） */
@@ -165,6 +172,31 @@ export function render() {
           </div>
 
           ${showEmbed ? `<div class="mt-16"><iframe src="${esc(launch || c.url)}" style="width:100%;height:520px;border:1px solid var(--line);border-radius:var(--r-lg);background:#fff"></iframe></div>` : ''}
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <div><div class="card-title">同進度系統嘅關係（聯邦式）</div>
+            <div class="card-sub">進度追蹤係<b>獨立系統</b>；呢度做入口同摘要，唔複製佢嘅資料</div></div>
+          <span class="badge ${R.dataReady ? 'b-ok' : 'b-warn'}"><span class="dot"></span>${R.dataReady ? '資料可對應' : '身份未對齊'}</span>
+        </div>
+        <div style="padding:18px 20px">
+          ${kv([
+            ['架構', '兩個系統，一條身份 —— 進度資料由 <b>' + esc(c.name) + '</b> 擁有（唯一寫入者），呢度只讀摘要'],
+            ['連結狀態', R.linkReady ? `<span style="color:var(--ok)">就緒（${R.pass}／${R.total}）</span>` : `<span style="color:var(--warn)">${R.pass}／${R.total}</span>`],
+            ['會籍編號（YMIS）覆蓋率', `<b>${R.ident.ymisPercent}%</b>（${R.ident.withYmis}／${R.ident.total} 位）`],
+            ['系統 ID 覆蓋率', `${R.ident.withSystemId}／${R.ident.total} 位（自動產生，做 fallback）`]
+          ])}
+          ${R.ident.ymisPercent < 100 ? noteBox(
+            `<b>要準確認到人，就要填會籍編號（YMIS）。</b>而家仲有 <b>${R.ident.total - R.ident.withYmis}</b> 位未填。<br>
+             未填嘅人，兩邊只可以用<b>姓名</b>配對 —— 會撞名、會漏。<span class="xs faint">（去「用戶 → 編輯」逐個補，或者由總表匯入）</span>`,
+            'warn') : noteBox('全部用戶都有會籍編號，兩邊可以一一對應。', 'info')}
+          <div class="row gap-8 wrap mt-12">
+            <button class="btn btn-sm" data-go="#/members">${icon('users', 15)} 去用戶名冊補 YMIS</button>
+            <button class="btn btn-sm" data-act="check">${icon('refresh', 15)} 測試連線</button>
+          </div>
+          <div class="hint mt-8">進度<b>資料</b>同步（唯讀摘要）要等對面系統嘅 API 對接完成；而家先做好身份層。</div>
         </div>
       </div>
 

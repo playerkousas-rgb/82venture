@@ -80,6 +80,8 @@ export const DEFAULT_TABLES = {
       { key: 'phone', label: '電話', type: 'tel', show: false },
       { key: 'email', label: '電郵', type: 'email', show: false },
       { key: 'join', label: '入團年份', type: 'text', show: false },
+      { key: 'ymis', label: '會籍編號（YMIS）', type: 'text', show: true },
+      { key: 'systemId', label: '系統 ID', type: 'text', show: false },
       { key: 'note', label: '備註', type: 'textarea', show: false }
     ]
   },

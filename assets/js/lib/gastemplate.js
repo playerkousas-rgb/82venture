@@ -92,7 +92,7 @@ function syncAll(body) {
   counts['transactions'] = writeTab(ss, body, '帳目', tables.transactions, schema.transactions, ['date', 'type', 'item', 'amount', 'category', 'method', 'byName', 'ref', 'period', 'note']);
   counts['claims'] = writeTab(ss, body, '收支申報', tables.claims, schema.claims, ['date', 'type', 'item', 'amount', 'category', 'byName', 'status', 'note']);
   counts['invItems'] = writeTab(ss, body, '物資', tables.invItems, schema.invItems, ['code', 'name', 'category', 'total', 'unit', 'location', 'condition', 'note']);
-  counts['members'] = writeTab(ss, body, '團員', tables.members, schema.members, ['name', 'eng', 'identity', 'birthday', 'role', 'status', 'phone', 'email', 'join', 'note']);
+  counts['members'] = writeTab(ss, body, '團員', tables.members, schema.members, ['ymis', 'systemId', 'name', 'eng', 'identity', 'birthday', 'role', 'status', 'phone', 'email', 'join', 'note']);
 
   // 通告：一張通告一行
   counts['notices'] = writeTab(ss, body, '通告', tables.notices, schema.notices, ['title.zh', 'title.en', 'type', 'status', 'eventDate', 'deadline', 'venue', 'fee', 'publishAt']);
