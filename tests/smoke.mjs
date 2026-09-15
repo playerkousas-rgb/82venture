@@ -1516,6 +1516,26 @@ console.log('\n▌新旅團申請接入（送去 ADMIN 收件匣）');
 
 }
 
+/* ---------- app 內教學要同實際做法一致 ---------- */
+{
+  window.location.hash = '#/docs/multiunit';
+  window.dispatchEvent(new window.HashChangeEvent('hashchange'));
+  await new Promise(r => setTimeout(r, 80));
+  const dt = doc.getElementById('view').textContent;
+  ok('教學「多旅團部署」有講新旅團申請接入', /新旅團申請接入/.test(dt));
+  ok('教學講明每旅團用自己嘅 Sheet（唔係共用總表）', /每個旅團用自己嘅 Google Sheet 做後端/.test(dt));
+  ok('教學有教起後端步驟（Code.gs / initializeSheets / 部署）',
+    /Code\.gs/.test(dt) && /initializeSheets/.test(dt) && /網頁應用程式/.test(dt));
+
+  window.location.hash = '#/docs/progress';
+  window.dispatchEvent(new window.HashChangeEvent('hashchange'));
+  await new Promise(r => setTimeout(r, 80));
+  const pt = doc.getElementById('view').textContent;
+  ok('教學「進度接駁」警告唔好填 GAS /exec', /唔好填 Google Apps Script/.test(pt) && /Unknown action/.test(pt));
+  ok('教學講明 Portal 身份可以留空（自動產生）', /可以留空/.test(pt) && /PORTAL-/.test(pt));
+  ok('教學講明團員用 YMIS、領袖用 Email', /團員／執委用 YMIS/.test(pt) && /領袖用 Email/.test(pt));
+}
+
 /* ---------- 總結 ---------- */
 const ms = Date.now() - t0;
 console.log(`\n──────── ${MODE.toUpperCase()} 測試結果：${pass} 通過 / ${fail} 失敗（${ms} ms）────────`);
