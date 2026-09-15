@@ -226,6 +226,20 @@
       "join": "",
       "note": "出生日期待補（原表未有）",
       "ymis": ""
+    },
+    {
+      "id": "m017",
+      "name": "徐頌學",
+      "eng": "",
+      "birthday": "",
+      "role": "",
+      "status": "active",
+      "tags": [],
+      "phone": "",
+      "email": "",
+      "join": "",
+      "note": "新入團（生日未填）。VSBADGE 顯示簡體「徐颂学」，以 YMIS 2026036356 對應。",
+      "ymis": "2026036356"
     }
   ]
 }

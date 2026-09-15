@@ -82,7 +82,10 @@ ok('帳戶名單永遠唔會有超管', !db.accounts.some(a => ['sheep', 'super'
 
 if (MODE === 'real') {
   section('真實資料內容');
-  ok('團員 16 人（由生日表內建）', db.members.length === 16, String(db.members.length));
+  ok('團員 17 人（由生日表內建）', db.members.length === 17, String(db.members.length));
+  ok('新團員徐頌學已加入名冊（YMIS 2026036356）',
+    db.members.some(m => m.name === '徐頌學' && m.ymis === '2026036356'),
+    JSON.stringify(db.members.filter(m => m.name === '徐頌學')));
   ok('團章 19 章', (db.constitution.chapters || []).length === 19, String(db.constitution.chapters.length));
   ok('團章有中英對照', !!(db.constitution.chapters[0].heading.zh && db.constitution.chapters[0].heading.en));
   ok('帳目由空白開始（唔會混入示範）', db.transactions.length === 0, String(db.transactions.length));
@@ -1171,6 +1174,22 @@ section('進度追蹤（連通檢查）');
      所以 u + from=portal + role + ymis 四樣缺一不可；少一樣就會跌返登入頁。 */
   ok('Portal 連結有 from=portal（免密碼）', R.url.includes('from=portal'), R.url);
   ok('Portal 連結帶 ymis（對方必要欄位）', /[?&]ymis=[^&]+/.test(R.url), R.url);
+  /* 自動身份：旅團接入零設定，唔使先去進度系統開帳戶再返嚟填 */
+  ok('portal.ymis 留空會自動產生 PORTAL-<旅團>-<角色>',
+    pv.portalIdentity({ portal: { unitParam: '0082', role: 'exec_committee', ymis: '' } }).ymis === 'PORTAL-0082-EXCO'
+    && pv.portalIdentity({ portal: { unitParam: '0082', role: 'exec_committee', ymis: '' } }).auto === true,
+    JSON.stringify(pv.portalIdentity({ portal: { unitParam: '0082', role: 'exec_committee', ymis: '' } })));
+  ok('自動身份跟角色變（領袖唔會撞執委）',
+    pv.portalIdentity({ portal: { unitParam: '0082', role: 'branch_leader', ymis: '' } }).ymis === 'PORTAL-0082-LEADER'
+    && pv.portalIdentity({ portal: { unitParam: '0082', role: 'group_leader', ymis: '' } }).ymis === 'PORTAL-0082-GLEADER');
+  ok('自己填咗專用身份就以佢為準',
+    pv.portalIdentity({ portal: { unitParam: '0082', role: 'exec_committee', ymis: 'EXCO-82' } }).ymis === 'EXCO-82'
+    && pv.portalIdentity({ portal: { unitParam: '0082', role: 'exec_committee', ymis: 'EXCO-82' } }).auto === false);
+  ok('連結帶 src（主系統 origin）同 ts，供對方日後驗證',
+    /[?&]src=/.test(R.url) && /[?&]ts=\d+/.test(R.url), R.url);
+  ok('零設定（ymis 留空）都係 10/10 就緒',
+    (() => { const c = pv.portalIdentity({ portal: { unitParam: '0082', role: 'exec_committee', ymis: '' } });
+      return !!c.ymis; })(), '');
   ok('Portal 連結帶 u（旅團編號）', /[?&]u=[^&]+/.test(R.url), R.url);
   ok('Portal 連結帶 role', /[?&]role=[^&]+/.test(R.url), R.url);
   ok('網址係對方前端而唔係 GAS /exec（實測：/exec 只回 JSON 錯誤頁）',
@@ -1376,6 +1395,35 @@ console.log('\n▌跨系統身份 key（進度追蹤係獨立系統，要靠 key
   ok('有 YMIS 時 memberKey 優先用 YMIS',
     model.memberKey({ ymis: 'Y123', systemId: 'abc' }).kind === 'ymis');
   ok('乜都冇 → key 係空', model.memberKey({}).key === '');
+  /* 對方規則：成員用 YMIS，領袖用 Email（佢登入頁寫住） */
+  ok('領袖優先用 Email 做 key（領袖本來就冇 YMIS）',
+    model.memberKey({ identity: 'leader', email: 'L@x.hk', ymis: '' }).kind === 'email');
+  ok('團員優先用 YMIS 做 key',
+    model.memberKey({ identity: 'member', email: 'a@x.hk', ymis: '2019259338' }).kind === 'ymis');
+  ok('expectedKeyKind：領袖→email，執委／團員→ymis',
+    model.expectedKeyKind({ identity: 'leader' }) === 'email'
+    && model.expectedKeyKind({ identity: 'exco' }) === 'ymis'
+    && model.expectedKeyKind({ identity: 'member' }) === 'ymis');
+  {
+    const kcL = model.keyCoverage([
+      { id: 'a', name: '領袖A', identity: 'leader', email: 'a@x.hk', systemId: 's1' },
+      { id: 'b', name: '團員B', identity: 'member', ymis: '2019259338', systemId: 's2' }
+    ]);
+    ok('領袖有 Email + 團員有 YMIS → 100% 對得上（唔會誤報領袖缺 YMIS）',
+      kcL.percent === 100 && kcL.unmatched === 0 && kcL.ready === true, JSON.stringify(kcL));
+    const kcM = model.keyCoverage([
+      { id: 'c', name: '領袖C', identity: 'leader', email: '', systemId: 's3' },
+      { id: 'd', name: '團員D', identity: 'member', ymis: '', systemId: 's4' }
+    ]);
+    ok('領袖冇 Email + 團員冇 YMIS → 列出要補乜',
+      kcM.unmatched === 2 && kcM.unmatchedList[0].need === 'email' && kcM.unmatchedList[1].need === 'ymis',
+      JSON.stringify(kcM.unmatchedList));
+    ok('systemId 唔算「對方認得到」（只係本系統 fallback）',
+      kcM.withSystemId === 2 && kcM.matched === 0, JSON.stringify(kcM));
+  }
+  ok('findByKey 可以用 Email 搵人（領袖）',
+    (() => { const m0 = store.load().members.find(x => String(x.email || '').trim());
+      return m0 ? model.findByKey(m0.email)?.id === m0.id : true; })());
 
   const keepY = first.ymis;
   const ymisBase = model.keyCoverage(store.load().members).withYmis;   // 基準（seed 可能已有真實 YMIS）
@@ -1402,15 +1450,18 @@ console.log('\n▌跨系統身份 key（進度追蹤係獨立系統，要靠 key
   window.location.hash = '#/members';
   window.dispatchEvent(new window.HashChangeEvent('hashchange'));
   await new Promise(r => setTimeout(r, 80));
-  ok('用戶列表有 YMIS 覆蓋率提示',
-    /會籍編號（YMIS）覆蓋率/.test(doc.getElementById('view').textContent));
+  ok('用戶列表有身份對應覆蓋率提示（按身份分 YMIS／Email）',
+    /可以同進度系統對上/.test(doc.getElementById('view').textContent)
+    && /團員／執委/.test(doc.getElementById('view').textContent)
+    && /領袖/.test(doc.getElementById('view').textContent));
 
   window.location.hash = '#/progress';
   window.dispatchEvent(new window.HashChangeEvent('hashchange'));
   await new Promise(r => setTimeout(r, 80));
   const pv = doc.getElementById('view').textContent;
   ok('進度頁講明係聯邦式（進度資料由對面系統擁有）', /聯邦式/.test(pv) && /獨立系統/.test(pv));
-  ok('進度頁顯示 YMIS 覆蓋率', /會籍編號（YMIS）覆蓋率/.test(pv));
+  ok('進度頁顯示身份對應覆蓋率（團員 YMIS／領袖 Email 分開計）',
+    /可以同對方對上/.test(pv) && /團員／執委（要有 YMIS）/.test(pv) && /領袖（要有 Email）/.test(pv));
   ok('進度頁分得開「連結就緒」同「身份對齊」', /連結狀態/.test(pv) && /資料可對應|身份未對齊/.test(pv));
   ok('進度頁有去補 YMIS 嘅捷徑', !!doc.querySelector('[data-go="#/members"]'));
 

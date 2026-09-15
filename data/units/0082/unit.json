@@ -85,8 +85,8 @@
     "portal": {
       "unitParam": "0082",
       "role": "exec_committee",
-      "_ymis_note": "Portal 信任模式必須有 ymis（對方 index.html：from=portal && ymis && role 先免登入進入）；留空會跌返登入頁。呢個係執委會共用嘅 portal 身份。",
-      "ymis": "EXCO-82",
+      "_ymis_note": "留空＝自動產生 PORTAL-<旅團>-<角色>，新旅團接入零設定。只有想用專用帳戶身份先需要填。",
+      "ymis": "",
       "extraParams": "embed=1"
     },
     "dedicated": {

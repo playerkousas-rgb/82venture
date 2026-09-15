@@ -30,8 +30,8 @@
         "portal": {
           "unitParam": "0082",
           "role": "exec_committee",
-          "_ymis_note": "Portal 信任模式**必須**有 ymis（對方 index.html：from=portal && ymis && role 先會免登入進入）。留空就會跌返去登入頁。",
-          "ymis": "EXCO-82",
+          "_ymis_note": "留空＝自動產生 PORTAL-<旅團>-<角色>，唔使先去進度系統開帳戶（對方 portal 分支唔核對 ymis 係咪真成員）。",
+          "ymis": "",
           "extraParams": "embed=1"
         },
         "_gas_backend_note": "旅團自己嘅 GAS 後端由 vsbadge 伺服器端 Registry（troops.json + TROOP_* env）保管，主系統唔需要亦唔應該帶。0082 嘅後端登記喺 vsbadge data/troops.json。"

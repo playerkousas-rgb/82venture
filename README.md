@@ -211,9 +211,21 @@ https://vsbadge.vercel.app/?u=0082&role=exec_committee&ymis=EXCO-82&name=執行�
 * 唔使喺對方系統開新帳號、唔使喺網址帶密碼、唔需要改對方系統
 * 另有「專用帳戶模式」（喺對面系統正常開一個執委帳戶）同「純連結模式」
 
-**跨系統對人靠會籍編號（YMIS）**：用戶頁逐個填（`data/units/0082/members.json` 嘅 `ymis` 欄），
-未填嘅只可以用姓名配對（會撞名、會漏）。用戶頁會顯示 **YMIS 覆蓋率**，
+**Portal 身份自動產生，旅團零設定**：`portal.ymis` 留空就會自動派
+`PORTAL-<旅團編號>-<角色>`（例 `PORTAL-0082-EXCO`），
+**唔使先去進度系統開帳戶再返嚟填** —— 新旅團接入時唔使多做嘢。
+（實測：對方 portal 分支唔會核對 `ymis` 係咪真成員，所以主系統可以自己派身份。）
+
+**跨系統對人靠身份欄，按身份分**：對方規矩係**團員用 YMIS（10 位數字）、領袖用 Email**，
+所以要補啱嗰個欄（`data/units/0082/members.json` 嘅 `ymis` / `email`）。
+未補嘅只可以用姓名配對（會撞名、會漏）。用戶頁會顯示覆蓋率同「未對得上」名單，
 進度頁會分開顯示「連結就緒」同「身份對齊」兩件事。
+
+> ⚠️ **對方 portal 模式而家完全冇驗證** —— 任何人砌一條
+> `?u=0082&from=portal&role=super_admin&ymis=x` 就攞到最高權限。
+> 放寬成「自動有權限」之前**必須先加驗證**。改法（registry 加 `portalOrigin` /
+> `portalRoles` ＋ `/api/portal` 驗證 endpoint）已寫好：
+> [`docs/PROGRESS_PORTAL_HANDOFF.md`](docs/PROGRESS_PORTAL_HANDOFF.md)
 
 ### 教學（內建）
 12 章使用說明：快速開始、帳戶與權限、團章、財務、**日常點輸入**、**手機記帳與通告**、

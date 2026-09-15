@@ -123,37 +123,69 @@ export function memberName(id) { return member(id)?.name || '—'; }
 export function activeMembers() { return members().filter(m => m.status !== 'alumni'); }
 
 /* ---------- 跨系統身份 key（同進度追蹤等外部系統對人用） ----------
-   ymis      會籍編號／YMIS —— 權威 key，同對面系統一樣
-   systemId  本系統派嘅穩定 ID —— 冇 YMIS 時嘅 fallback
-   冇 key 就只可以靠姓名配對（會撞名、會漏），所以呢度會報告覆蓋率。 */
+   對方（VSBADGE）嘅身份規則：**成員用 YMIS（10 位數字），領袖用 Email**。
+   （佢登入頁：「成員：YMIS 10位數字 + 密碼；領袖：Email + 密碼」）
+   所以唔可以一刀切要求所有人都有 YMIS —— 領袖本來就唔會有，
+   把領袖當「未填 YMIS」係計錯。呢度按身份揀啱嘅 key。 */
 
-/** 用戶嘅跨系統 key（YMIS 優先） */
+/** 呢位用戶**應該**用邊種外部 key（領袖→email，其他→ymis） */
+export function expectedKeyKind(m) { return identityOf(m) === 'leader' ? 'email' : 'ymis'; }
+
+/** 用戶嘅跨系統 key（按身份揀：領袖 email 優先，團員／執委 YMIS 優先） */
 export function memberKey(m) {
-  const y = String(m?.ymis || '').trim();
-  if (y) return { key: y, kind: 'ymis' };
+  const ymis = String(m?.ymis || '').trim();
+  const email = String(m?.email || '').trim().toLowerCase();
+  const order = expectedKeyKind(m) === 'email'
+    ? [['email', email], ['ymis', ymis]]
+    : [['ymis', ymis], ['email', email]];
+  for (const [kind, v] of order) if (v) return { key: v, kind };
   const sys = String(m?.systemId || '').trim();
-  if (sys) return { key: sys, kind: 'systemId' };
+  if (sys) return { key: sys, kind: 'systemId' };   // 對方認唔到，只係本系統 fallback
   return { key: '', kind: '' };
 }
-/** 名冊嘅身份 key 覆蓋率（federation 就緒程度） */
+/**
+ * 名冊嘅身份 key 覆蓋率。
+ * 「對得上」＝有對方認得嘅 key（團員有 YMIS / 領袖有 Email）。
+ * systemId 只係本系統 fallback，對方認唔到，所以唔算「對得上」。
+ */
 export function keyCoverage(list = members()) {
   const total = list.length;
+  const leaders = list.filter(m => identityOf(m) === 'leader');
+  const youth = list.filter(m => identityOf(m) !== 'leader');
   const withYmis = list.filter(m => String(m.ymis || '').trim()).length;
-  const withSys = list.filter(m => String(m.systemId || '').trim()).length;
+  const withEmail = list.filter(m => String(m.email || '').trim()).length;
+  const withSystemId = list.filter(m => String(m.systemId || '').trim()).length;
+  const youthOk = youth.filter(m => String(m.ymis || '').trim());
+  const leaderOk = leaders.filter(m => String(m.email || '').trim());
+  const matched = youthOk.length + leaderOk.length;
+  const unmatched = total - matched;
+  const pct = (n, d) => (d ? Math.round((n / d) * 100) : 0);
   return {
-    total, withYmis, withSystemId: withSys,
-    missing: list.filter(m => !memberKey(m).key).length,
-    /** 全部人都至少有一個 key 先算 ready */
-    ready: total > 0 && withSys === total,
-    /** YMIS 覆蓋率（同對面系統真正對得上嘅比例） */
-    ymisPercent: total ? Math.round((withYmis / total) * 100) : 0
+    total, withYmis, withEmail, withSystemId,
+    youthTotal: youth.length, leaderTotal: leaders.length,
+    youthWithYmis: youthOk.length, leaderWithEmail: leaderOk.length,
+    matched, unmatched,
+    /** 整體「對方認得到」嘅比例 */
+    percent: pct(matched, total),
+    youthPercent: pct(youthOk.length, youth.length),
+    leaderPercent: pct(leaderOk.length, leaders.length),
+    /** 兼容舊寫法：團員嘅 YMIS 覆蓋率 */
+    ymisPercent: pct(youthOk.length, youth.length),
+    ready: total > 0 && unmatched === 0,
+    /** 未對得上嘅人（用嚟列出嚟提示補返） */
+    unmatchedList: list.filter(m => {
+      const need = expectedKeyKind(m);
+      return !(need === 'email' ? String(m.email || '').trim() : String(m.ymis || '').trim());
+    }).map(m => ({ id: m.id, name: m.name, identity: identityOf(m), need: expectedKeyKind(m) }))
   };
 }
-/** 用 key 搵人（YMIS 或 systemId） */
+/** 用 key 搵人（YMIS / Email / systemId） */
 export function findByKey(key) {
   const k = String(key || '').trim();
   if (!k) return null;
+  const kl = k.toLowerCase();
   return members().find(m => String(m.ymis || '').trim() === k
+    || String(m.email || '').trim().toLowerCase() === kl
     || String(m.systemId || '').trim() === k) || null;
 }
 export function memberStatus() {

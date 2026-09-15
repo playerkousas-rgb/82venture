@@ -32,6 +32,31 @@ export const PROGRESS_ROLES = [
 ];
 export const TICK_ROLES = PROGRESS_ROLES.filter(r => r.tick).map(r => r.v);
 
+const ROLE_SHORT = {
+  exec_committee: 'EXCO', branch_leader: 'LEADER', group_leader: 'GLEADER',
+  admin: 'ADMIN', super_admin: 'SUPER', member: 'MEMBER'
+};
+
+/**
+ * Portal 身份 —— **自動產生，唔使人手填**。
+ *
+ * 點解可以咁做：對方 index.html 嘅 portal 分支只係
+ *   if (from==='portal' && ymis && role) { currentUser = { ymis, role, can_tick: …, allowed_badges:'*' } }
+ * 佢**唔會**核對 ymis 係咪真係該旅團成員（實測：用一個任意字串都入到，
+ * 介面顯示「(该字串) 自己」）。所以呢邊可以自己派一個穩定身份過去，
+ * 未來新旅團接入時**唔使先去進度系統開帳戶再返嚟填**。
+ *
+ * 身份格式：PORTAL-<旅團編號>-<角色縮寫>，穩定可審計（對方紀錄到係邊個旅團邊種角色入嚟）。
+ * 如果旅團想用自己嘅專用身份，喺設定度填咗就以佢為準。
+ */
+export function portalIdentity(c) {
+  const manual = String(c.portal?.ymis || '').trim();
+  if (manual) return { ymis: manual, auto: false };
+  const unit = String(c.portal?.unitParam || load().unitCode || 'UNIT').trim();
+  const role = String(c.portal?.role || 'exec_committee');
+  return { ymis: `PORTAL-${unit}-${ROLE_SHORT[role] || 'EXCO'}`, auto: true };
+}
+
 function cfg() {
   const p = profile();
   const db = load();
@@ -53,9 +78,13 @@ function buildUrl(c) {
     const p = c.portal || {};
     if (p.unitParam) qs.set('u', p.unitParam);
     if (p.role) qs.set('role', p.role);
-    if (p.ymis) qs.set('ymis', p.ymis);
+    qs.set('ymis', portalIdentity(c).ymis);           // 自動產生，唔使人手填
     qs.set('name', (p.name || '執委會').trim());
     qs.set('from', 'portal');
+    /* 交接來源：對方日後可以用呢個（配合佢 registry 登記嘅主系統網址）驗證
+       「真係由該旅團嘅執委系統入嚟」，而唔係淨係信 URL 參數 */
+    try { qs.set('src', globalThis.location?.origin || ''); } catch (e) { /* 冇 origin 就算 */ }
+    qs.set('ts', String(Date.now()));
     (String(p.extraParams || '').split('&').filter(Boolean)).forEach(kv => {
       const [k, v = '1'] = kv.split('=');
       qs.set(k.trim(), v);
@@ -87,8 +116,12 @@ export function readiness() {
     { ok: c.mode !== 'portal' || !!(c.portal?.unitParam), label: 'Portal 帶旅團編號（u）', detail: c.portal?.unitParam || '（未填）' },
     /* 對方 index.html：if (from==='portal' && ymis && role) 先會免登入進入。
        冇 ymis 就會跌返去登入頁 —— 即係「連通」表面成功、實際冇帶到身份。 */
-    { ok: c.mode !== 'portal' || !!(c.portal?.ymis || '').trim(), label: 'Portal 帶身份（ymis）—— 對方必要欄位',
-      detail: (c.portal?.ymis || '').trim() || '（未填 → 對方會跌返登入頁，唔會免登入進入）' },
+    { ok: c.mode !== 'portal' || !!portalIdentity(c).ymis, label: 'Portal 帶身份（ymis）—— 對方必要欄位',
+      detail: (() => {
+        if (c.mode !== 'portal') return '—';
+        const pi = portalIdentity(c);
+        return pi.auto ? `${pi.ymis} <span class="faint">（自動產生，唔使人手填）</span>` : `${pi.ymis}（你自己填嘅專用身份）`;
+      })() },
     { ok: c.mode !== 'portal' || TICK_ROLES.includes(c.portal?.role), label: 'Portal 角色有管理／勾選權',
       detail: c.portal?.role
         ? (TICK_ROLES.includes(c.portal?.role) ? c.portal?.role : `⚠ 「${c.portal?.role}」對方唔認，會當你冇權限`)
@@ -209,13 +242,16 @@ export function render() {
           ${kv([
             ['架構', '兩個系統，一條身份 —— 進度資料由 <b>' + esc(c.name) + '</b> 擁有（唯一寫入者），呢度只讀摘要'],
             ['連結狀態', R.linkReady ? `<span style="color:var(--ok)">就緒（${R.pass}／${R.total}）</span>` : `<span style="color:var(--warn)">${R.pass}／${R.total}</span>`],
-            ['會籍編號（YMIS）覆蓋率', `<b>${R.ident.ymisPercent}%</b>（${R.ident.withYmis}／${R.ident.total} 位）`],
-            ['系統 ID 覆蓋率', `${R.ident.withSystemId}／${R.ident.total} 位（自動產生，做 fallback）`]
+            ['可以同對方對上', `<b>${R.ident.percent}%</b>（${R.ident.matched}／${R.ident.total} 位）`],
+            ['團員／執委（要有 YMIS）', `${R.ident.youthWithYmis}／${R.ident.youthTotal} 位（${R.ident.youthPercent}%）`],
+            ['領袖（要有 Email）', `${R.ident.leaderWithEmail}／${R.ident.leaderTotal} 位（${R.ident.leaderPercent}%）`],
+            ['系統 ID', `${R.ident.withSystemId}／${R.ident.total} 位（本系統 fallback，對方認唔到）`]
           ])}
-          ${R.ident.ymisPercent < 100 ? noteBox(
-            `<b>要準確認到人，就要填會籍編號（YMIS）。</b>而家仲有 <b>${R.ident.total - R.ident.withYmis}</b> 位未填。<br>
-             未填嘅人，兩邊只可以用<b>姓名</b>配對 —— 會撞名、會漏。<span class="xs faint">（去「用戶 → 編輯」逐個補，或者由總表匯入）</span>`,
-            'warn') : noteBox('全部用戶都有會籍編號，兩邊可以一一對應。', 'info')}
+          ${R.ident.unmatched > 0 ? noteBox(
+            `<b>仲有 ${R.ident.unmatched} 位對唔上。</b>對方嘅規矩係<b>團員用 YMIS（10 位數字）、領袖用 Email</b> ——
+             請按身份補啱嗰個欄，未補嘅兩邊只可以用<b>姓名</b>配對（會撞名、會漏）。<br>
+             <span class="xs">${R.ident.unmatchedList.slice(0, 8).map(x => `${esc(x.name)}（${x.need === 'email' ? 'Email' : 'YMIS'}）`).join('、')}${R.ident.unmatchedList.length > 8 ? ' 等' : ''}</span>`,
+            'warn') : noteBox('全部用戶都有對方認得嘅身份欄，兩邊可以一一對應。', 'info')}
           <div class="row gap-8 wrap mt-12">
             <button class="btn btn-sm" data-go="#/members">${icon('users', 15)} 去用戶名冊補 YMIS</button>
             <button class="btn btn-sm" data-act="check">${icon('refresh', 15)} 測試連線</button>
@@ -420,11 +456,12 @@ export function mount(root) {
             <div class="hint">揀「團員」嘅話對方只畀睇自己進度；執委／領袖先有勾選同審批權。</div></div>
           <div class="field"><label class="label">旅團編號參數（u）</label>
             <input class="input" id="q-unit" value="${esc(cc.portal?.unitParam || load().unitCode)}"></div>
-          <div class="field"><label class="label">Portal 身份（ymis） <span class="req">*</span></label>
-            <input class="input" id="q-ymis" value="${esc(cc.portal?.ymis || '')}" placeholder="例：EXCO-82">
-            <div class="hint"><b>必填</b>。對方嘅判斷係 <code>from=portal &amp;&amp; ymis &amp;&amp; role</code> ——
-              <b>留空就唔會免登入進入</b>，會跌返去登入頁（即係連通失敗）。呢度填執委會共用嘅身份；
-              個別團員嘅 YMIS 喺「用戶」度填，用嚟對進度。</div></div>
+          <div class="field"><label class="label">Portal 身份（ymis）—— <b>可以留空</b></label>
+            <input class="input" id="q-ymis" value="${esc(cc.portal?.ymis || '')}" placeholder="留空＝自動產生">
+            <div class="hint">留空就會<b>自動產生</b> <code>${esc(portalIdentity({ ...cc, portal: { ...cc.portal, ymis: '' } }).ymis)}</code>，
+              <b>唔使先去進度系統開帳戶再返嚟填</b> —— 新旅團接入時零設定。
+              只有想用某個<b>專用帳戶</b>身份入去時先需要填。
+              <div class="mt-4">（個別<b>團員</b>嘅 YMIS 係另一件事：喺「用戶」度填，用嚟把兩邊嘅同一個人對上。）</div></div></div>
           <div class="field"><label class="label">其他參數（& 分隔）</label>
             <input class="input" id="q-extra" value="${esc(cc.portal?.extraParams || 'embed=1')}"></div>
           <div class="field"><label class="label">專用帳戶登入帳號</label>

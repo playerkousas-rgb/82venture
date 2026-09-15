@@ -6,7 +6,7 @@ import { collection, find, add, update, remove, commit, load, newSystemId } from
 import {
   members, member, memberName, attendanceStats, fees, memberStatus, memberBirthdayText,
   birthdayList, birthdaysThisMonth, birthdaysWithin, birthdaySummary, money, settings, profile,
-  IDENTITIES, identityLabel, identityOf, guessIdentity, keyCoverage, memberKey
+  IDENTITIES, identityLabel, identityOf, guessIdentity, keyCoverage, memberKey, expectedKeyKind
 } from '../lib/model.js';
 import {
   bindDraftAutosave, readDraft, applyDraft, clearDraft, draftBanner, confirmDanger, undoable
@@ -71,11 +71,16 @@ function listView() {
 
   ${(() => {
     const kc = keyCoverage(all);
-    if (!kc.total || kc.ymisPercent === 100) return '';
-    return `<div class="note-box ${kc.withYmis ? '' : 'warn'} mb-16">${icon('alert', 15)}<div>
-      <b>會籍編號（YMIS）覆蓋率 ${kc.ymisPercent}%</b>（${kc.withYmis}／${kc.total} 位已填）。
-      <div class="xs">進度追蹤係<b>獨立系統</b>，兩邊要靠 YMIS 先可以準確認到同一個人；
-      未填嘅只可以用姓名配對（會撞名、會漏）。撳「編輯」逐個補返，或者由總表匯入。</div></div></div>`;
+    if (!kc.total || kc.unmatched === 0) return '';
+    const names = kc.unmatchedList.slice(0, 6)
+      .map(x => `${esc(x.name)}（${x.need === 'email' ? '要 Email' : '要 YMIS'}）`).join('、');
+    return `<div class="note-box ${kc.matched ? '' : 'warn'} mb-16">${icon('alert', 15)}<div>
+      <b>可以同進度系統對上：${kc.percent}%</b>（${kc.matched}／${kc.total} 位）
+      · 團員／執委 ${kc.youthWithYmis}／${kc.youthTotal} 有 YMIS
+      · 領袖 ${kc.leaderWithEmail}／${kc.leaderTotal} 有 Email
+      <div class="xs">進度追蹤係<b>獨立系統</b>。對方嘅規矩係<b>團員用 YMIS（10 位數字）、領袖用 Email</b>，
+      所以要按身份補啱嗰個欄；未補嘅只可以用姓名配對（會撞名、會漏）。</div>
+      <div class="xs mt-4">未對得上：${names}${kc.unmatchedList.length > 6 ? ` 等 ${kc.unmatchedList.length} 位` : ''}</div></div></div>`;
   })()}
 
   <div class="grid g-3 mb-16">
@@ -257,7 +262,11 @@ function detail(id) {
             ['姓名', `<b>${esc(m.name)}</b>`],
             ['身份', `<span class="badge ${IDENTITIES[identityOf(m)].c}"><span class="dot"></span>${esc(identityLabel(m))}</span>`],
             ['英文名', esc(m.eng || '—')],
-            ['會籍編號（YMIS）', m.ymis ? `<span class="semibold" style="font-family:var(--mono)">${esc(m.ymis)}</span> <span class="tag brand">可對應進度系統</span>` : '<span class="faint">未填 —— 進度系統只可以用姓名／系統 ID 配對</span>'],
+            ['會籍編號（YMIS）', m.ymis
+              ? `<span class="semibold" style="font-family:var(--mono)">${esc(m.ymis)}</span> <span class="tag brand">可對應進度系統</span>`
+              : (expectedKeyKind(m) === 'ymis'
+                ? '<span style="color:var(--warn)">未填 —— 團員／執委要有 YMIS 先可以同進度系統對上</span>'
+                : '<span class="faint">領袖用 Email 對應，YMIS 可以留空</span>')],
             ['系統 ID', `<span class="xs faint" style="font-family:var(--mono)">${esc(m.systemId || '—')}</span>`],
             ['生日', `${esc(memberBirthdayText(m))}${ageFrom(m.birthday) !== null ? ` · ${ageFrom(m.birthday)} 歲` : ''}`],
             ['職位', esc(m.role || '—')],
