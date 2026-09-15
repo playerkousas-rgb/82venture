@@ -402,8 +402,9 @@ function progressDoc() {
     <thead><tr><th>模式</th><th>做法</th><th>好處／限制</th></tr></thead>
     <tbody>
       <tr><td><b>Portal 信任模式（推薦）</b></td>
-        <td>連結帶 <code>u=旅團編號&amp;role=exec_committee&amp;from=portal</code>，對面系統直接當你係執委</td>
-        <td>唔使開新帳號、URL 冇密碼。前提：對面系統支援 <code>from=portal</code>（你嗰個 GAS 已經支援）</td></tr>
+        <td>連結帶 <code>u=旅團編號&amp;role=exec_committee&amp;ymis=自動&amp;from=portal</code>，對面系統直接當你係執委</td>
+        <td>唔使開新帳號、URL 冇密碼、<b>旅團零設定</b>（身份自動產生 <code>PORTAL-旅團-角色</code>）。
+          前提：對面系統支援 <code>from=portal</code>，而且你嘅旅團已登記喺對方 Registry</td></tr>
       <tr><td>專用帳戶模式</td>
         <td>喺對面系統開一個「執委」帳戶，喺本系統填帳號密碼，開連結時自動帶埋</td>
         <td>唔使改對面系統，可以隨時停用該帳戶；但密碼會出現在網址，建議只喺自己電腦用</td></tr>
@@ -413,13 +414,20 @@ function progressDoc() {
     </tbody>
   </table>
   ${noteBox(`<b>建議：</b>既然對面系統可以設定「經呢個系統入 = 執委帳戶」，就用 Portal 模式 —— 唔使喺 URL 帶密碼，出事只要喺本系統停止帶身份即可。`, 'brand')}
+  ${noteBox('<b>網址要填對面系統嘅「前端」</b>（例 <code>https://vsbadge.vercel.app/</code>），'
+    + '<b>唔好填 Google Apps Script 嘅 <code>/exec</code></b> —— 嗰條係 API 端點，'
+    + '開出嚟只會見到 <code>{"success":false,"error":"Unknown action"}</code> 而唔係系統介面。', 'warn')}
   ${H('點設定')}
   <div class="steps">
-    <div class="step"><div>「進度 → 設定」填對面系統網址</div></div>
-    <div class="step"><div>揀連接模式，填角色（例如 <code>exec_committee</code>）同旅團編號</div></div>
-    <div class="step"><div>儲存 → 按「以執委身份開啟」即跳過去（免登入）</div></div>
+    <div class="step"><div>「進度 → 設定」填對面系統<b>前端</b>網址</div></div>
+    <div class="step"><div>揀連接模式，揀角色（<code>exec_committee</code> / <code>branch_leader</code> / <code>group_leader</code> / <code>admin</code> / <code>super_admin</code> —— 呢啲先有勾選同審批權）同旅團編號</div></div>
+    <div class="step"><div><b>Portal 身份（ymis）可以留空</b> —— 會自動產生 <code>PORTAL-&lt;旅團&gt;-&lt;角色&gt;</code>，唔使先去進度系統開帳戶</div></div>
+    <div class="step"><div>儲存 → 按「以執委身份開啟」即跳過去（免登入），或者勾「內嵌預覽」喺呢邊直接睇</div></div>
     <div class="step"><div>需要派畀團員就用「QR Code」</div></div>
   </div>
+  ${H('兩邊點對上同一個人')}
+  ${P('進度追蹤係<b>獨立系統</b>，兩邊靠身份欄對人。對方規矩：<b>團員／執委用 YMIS（10 位數字）、領袖用 Email</b>。'
+    + '喺「用戶」度逐個補，用戶頁會顯示覆蓋率同「未對上で」名單；未補嘅只可以用姓名配對（會撞名、會漏）。')}
   ${H('目前設定')}
   <pre><code>${esc(JSON.stringify({
     url: u.url || '（未設定）',
@@ -471,13 +479,25 @@ function multiUnitDoc() {
     inventory.json           ← 物資 / 借用
     meetings.json            ← 會議（可選）
   mock/                      ← 示範資料（同真資料分離）</code></pre>
-  ${H('新增一個旅團（4 步）')}
+  ${H('新旅團點接入（推薦：用申請表）')}
+  ${P('<b>每個旅團用自己嘅 Google Sheet 做後端</b>，唔係共用一張總表。流程：')}
   <div class="steps">
-    <div class="step"><div>喺 <code>data/units.json</code> 嘅 <code>units</code> 加一個編號，例如 <code>"0100": { "code": "0100", "name": "第一百旅深資童軍團", "dataPath": "data/units/0100/" }</code></div></div>
-    <div class="step"><div>建立 <code>data/units/0100/</code> 資料夾，複製 0082 嘅檔案再改內容</div></div>
-    <div class="step"><div>Commit & push（如果用 GitHub Pages，會自動部署）</div></div>
-    <div class="step"><div>打開系統 → 右上角旅團選擇器 → 揀新旅團（或者用 <code>?u=0100</code> 連結）</div></div>
+    <div class="step"><div><b>起後端</b> —— 「表格與同步 → 總表同步」下載 <code>Code.gs</code> → 建一張新 Google Sheet → 擴充功能 → Apps Script → 貼上</div></div>
+    <div class="step"><div>執行 <code>initializeSheets</code>（會建好全部分頁），複製 <b>API Key</b></div></div>
+    <div class="step"><div>部署做<b>網頁應用程式</b>（執行身分：我；存取權：任何人），複製 <code>/exec</code> 網址</div></div>
+    <div class="step"><div>打開呢個系統 → 旅團選擇畫面 → 撳「<b>新旅團申請接入</b>」→ 填編號／名稱／<code>/exec</code> 網址／API Key → 送出</div></div>
+    <div class="step"><div>平台管理員收到申請 → 加進兩邊嘅 Registry（82venture ＋ 進度追蹤系統）→ 完成開戶同連通</div></div>
   </div>
+  ${noteBox('申請會連<b>主系統網址</b>一齊送出 —— 管理員要用佢做進度系統嘅 <code>portalOrigin</code>（核准邊個網站可以帶身份入去）。', 'info')}
+
+  ${H('管理員手工加（進階）')}
+  <div class="steps">
+    <div class="step"><div>喺 <code>data/units.json</code> 嘅 <code>units</code> 加一個編號，例如 <code>"0100": { "code": "0100", "name": "第一百旅深資童軍團", "dataPath": "data/units/0100/", "backend": { "gasUrl": "…/exec", "apiKey": "…" } }</code></div></div>
+    <div class="step"><div>建立 <code>data/units/0100/</code> 資料夾，複製 0082 嘅檔案再改內容（<code>unit.json</code> 入面記得填 <code>progress</code>）</div></div>
+    <div class="step"><div>Commit & push（如果用 GitHub Pages / Vercel，會自動部署）</div></div>
+    <div class="step"><div>打開系統 → 旅團選擇器 → 揀新旅團（或者用 <code>?u=0100</code> 連結）</div></div>
+  </div>
+  ${P('<span class="xs faint">詳細欄位名同每次收到申請嘅 checklist：見 repo 入面 <code>docs/ADMIN_ONBOARDING.md</code>。</span>')}
   ${H('資料隔離')}
   ${P('每個旅團嘅資料存喺 <code>venture82.unit.&lt;編號&gt;.db.v2</code>，互相睇唔到、改唔到。團章公開頁用 <code>constitution.html?u=編號</code>，QR Code 亦會自動帶旅團編號。')}
   ${H('權限')}
