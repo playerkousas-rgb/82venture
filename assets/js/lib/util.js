@@ -175,20 +175,43 @@ export function icon(name, size = 18, cls = '') {
 
 /* ---------- toast ---------- */
 let toastHost;
-export function toast(message, kind = '') {
+function toastEl() {
   toastHost = toastHost || (() => {
     const el = document.createElement('div');
     el.id = 'toasts'; document.body.appendChild(el); return el;
   })();
-  const t = document.createElement('div');
-  t.className = 'toast ' + kind;
-  t.innerHTML = (kind === 'ok' ? icon('check', 15) : kind === 'err' ? icon('alert', 15) : '') + `<span>${esc(message)}</span>`;
-  toastHost.appendChild(t);
+  return toastHost;
+}
+function fadeOut(t, ms = 2600) {
   setTimeout(() => {
     t.style.transition = 'opacity .25s, transform .25s';
     t.style.opacity = '0'; t.style.transform = 'translateY(10px)';
     setTimeout(() => t.remove(), 260);
-  }, 2600);
+  }, ms);
+}
+export function toast(message, kind = '') {
+  const t = document.createElement('div');
+  t.className = 'toast ' + kind;
+  t.innerHTML = (kind === 'ok' ? icon('check', 15) : kind === 'err' ? icon('alert', 15) : '') + `<span>${esc(message)}</span>`;
+  toastEl().appendChild(t);
+  fadeOut(t);
+}
+/** 有按鈕嘅 toast（例：刪除之後「還原」） */
+export function toastAction(message, actionLabel, onAction, kind = '', ms = 6500) {
+  const t = document.createElement('div');
+  t.className = 'toast ' + kind;
+  t.innerHTML = (kind === 'ok' ? icon('check', 15) : kind === 'err' ? icon('alert', 15) : icon('history', 15))
+    + `<span>${esc(message)}</span><button class="toast-act" type="button">${esc(actionLabel)}</button>`;
+  toastEl().appendChild(t);
+  let done = false;
+  t.querySelector('.toast-act').addEventListener('click', () => {
+    if (done) return;
+    done = true;
+    try { onAction?.(); } catch (e) { console.error(e); }
+    t.remove();
+  });
+  fadeOut(t, ms);
+  return t;
 }
 
 /* ---------- modal ---------- */

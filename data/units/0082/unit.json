@@ -80,11 +80,12 @@
   },
   "progress": {
     "name": "深資童軍進度及行政平台 (VSBADGE)",
-    "url": "https://script.google.com/macros/s/AKfycbxqQ3JnEdSRnxlhoSEasa6-wX5F58p3dMqBiQRj1zg-SDn7YtFLBKykN5LiWcadgRdCBg/exec",
+    "url": "https://vsbadge.vercel.app/",
     "mode": "portal",
     "portal": {
       "unitParam": "0082",
       "role": "exec_committee",
+      "_ymis_note": "留空＝自動產生 PORTAL-<旅團>-<角色>，新旅團接入零設定。只有想用專用帳戶身份先需要填。",
       "ymis": "",
       "extraParams": "embed=1"
     },

@@ -48,6 +48,7 @@ function mainView(params) {
     actions: `
       ${can('inv.borrow') ? `<button class="btn btn-sm btn-primary" data-act="new-loan">${icon('plus', 15)} 申請借用</button>` : ''}
       ${can('inv.manage') ? `<button class="btn btn-sm" data-act="new-item">${icon('plus', 15)} 新增物資</button>` : ''}
+      <button class="btn btn-sm" data-go="#/links">${icon('share', 15)} 畀成員自己借（QR）</button>
       <button class="btn btn-sm" data-act="export-word">${icon('download', 15)} 輸出 Word</button>`
   })}
 
@@ -383,6 +384,7 @@ function printBlankSlip() {
    mount
    ============================================================ */
 export function mount(root, params) {
+  root.querySelectorAll('[data-go]').forEach(el => el.addEventListener('click', () => go(el.dataset.go)));
   root.querySelectorAll('[data-tab]').forEach(b => b.addEventListener('click', () => {
     tab = b.dataset.tab;
     const hash = tab === 'items' ? '#/inventory' : `#/inventory/${tab}`;

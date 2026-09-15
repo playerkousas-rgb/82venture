@@ -2,11 +2,15 @@
    members.js — 團員名冊、個人紀錄、生日表（可改、可輸出）
    ============================================================ */
 
-import { collection, find, add, update, remove, commit, load } from '../lib/store.js';
+import { collection, find, add, update, remove, commit, load, newSystemId } from '../lib/store.js';
 import {
   members, member, memberName, attendanceStats, fees, memberStatus, memberBirthdayText,
-  birthdayList, birthdaysThisMonth, birthdaysWithin, birthdaySummary, money, settings, profile
+  birthdayList, birthdaysThisMonth, birthdaysWithin, birthdaySummary, money, settings, profile,
+  IDENTITIES, identityLabel, identityOf, guessIdentity, keyCoverage, memberKey, expectedKeyKind
 } from '../lib/model.js';
+import {
+  bindDraftAutosave, readDraft, applyDraft, clearDraft, draftBanner, confirmDanger, undoable
+} from '../lib/guard.js';
 import { parseBirthday, ageFrom, daysUntilBirthday, turningAge, todayISO, isValidBirthday } from '../lib/dates.js';
 import {
   esc, icon, avatar, fmtDate, relDay, modal, confirmDlg, toast, uid, download, nf, pct
@@ -18,16 +22,18 @@ import { pageHead, tabs, empty, kv, chipbar, progressBar, noteBox } from './ui.j
 
 let kw = '';
 let statusFilter = 'all';
+let idFilter = 'all';
 let bdayMonth = new Date().getMonth() + 1;
 let tab = 'list';
 
-export function title() { return '團員'; }
+export function title() { return '用戶'; }
 
 export function render(params) {
   const id = params.id;
   if (id === 'new') return editor(null);
-  if (id && id !== 'birthdays') return detail(id);
+  if (id === 'edit') return editor(params.action);        // #/members/edit/<id>
   if (id === 'birthdays') return birthdayView();
+  if (id) return detail(id);
   return listView();
 }
 
@@ -39,22 +45,43 @@ function listView() {
   const S = memberStatus();
   let list = all;
   if (statusFilter !== 'all') list = list.filter(m => m.status === statusFilter);
+  if (idFilter !== 'all') list = list.filter(m => identityOf(m) === idFilter);
   if (kw) {
     const k = kw.toLowerCase();
-    list = list.filter(m => (m.name + ' ' + (m.eng || '') + ' ' + (m.role || '') + ' ' + (m.phone || '')).toLowerCase().includes(k));
+    list = list.filter(m => (m.name + ' ' + (m.eng || '') + ' ' + (m.role || '') + ' ' + identityLabel(m) + ' ' + (m.phone || '')).toLowerCase().includes(k));
   }
   const b = birthdaySummary();
+  const cnt = k => all.filter(m => identityOf(m) === k).length;
 
   return `
   ${pageHead({
-    title: '團員',
-    sub: `${all.length} 人 · 現役 ${all.filter(m => m.status === 'active').length} 人`,
+    title: '用戶',
+    sub: `${all.length} 位 · 領袖 ${cnt('leader')} · 執委 ${cnt('exco')} · 團員 ${cnt('member')}`,
     actions: `
       ${can('member.export') ? `<button class="btn btn-sm" data-act="exp-csv">${icon('download', 15)} CSV</button>
       <button class="btn btn-sm" data-act="exp-word">${icon('download', 15)} Word</button>
       <button class="btn btn-sm" data-act="exp-bday">${icon('sparkle', 15)} 生日表</button>` : ''}
-      ${can('member.create') ? `<button class="btn btn-sm btn-primary" data-act="new">${icon('plus', 15)} 新增團員</button>` : ''}`
+      ${can('member.create') ? `<button class="btn btn-sm btn-primary" data-act="new">${icon('plus', 15)} 新增用戶</button>` : ''}`
   })}
+
+  <div class="note-box mb-16">${icon('users', 15)}<div>
+    呢度係<b>用戶名冊</b> —— 領袖、執委同團員都會列喺呢度。
+    每一行都可以撳「<b>編輯</b>」改資料同<b>身份</b>（領袖 / 執委 / 團員）。
+    <div class="xs faint mt-4">改動會先暫存喺呢部裝置，撳「儲存」先寫入；撳「同步」先送去總表。</div></div></div>
+
+  ${(() => {
+    const kc = keyCoverage(all);
+    if (!kc.total || kc.unmatched === 0) return '';
+    const names = kc.unmatchedList.slice(0, 6)
+      .map(x => `${esc(x.name)}（${x.need === 'email' ? '要 Email' : '要 YMIS'}）`).join('、');
+    return `<div class="note-box ${kc.matched ? '' : 'warn'} mb-16">${icon('alert', 15)}<div>
+      <b>可以同進度系統對上：${kc.percent}%</b>（${kc.matched}／${kc.total} 位）
+      · 團員／執委 ${kc.youthWithYmis}／${kc.youthTotal} 有 YMIS
+      · 領袖 ${kc.leaderWithEmail}／${kc.leaderTotal} 有 Email
+      <div class="xs">進度追蹤係<b>獨立系統</b>。對方嘅規矩係<b>團員用 YMIS（10 位數字）、領袖用 Email</b>，
+      所以要按身份補啱嗰個欄；未補嘅只可以用姓名配對（會撞名、會漏）。</div>
+      <div class="xs mt-4">未對得上：${names}${kc.unmatchedList.length > 6 ? ` 等 ${kc.unmatchedList.length} 位` : ''}</div></div></div>`;
+  })()}
 
   <div class="grid g-3 mb-16">
     <div class="card" style="cursor:pointer" data-go="#/members/birthdays">
@@ -81,18 +108,21 @@ function listView() {
   </div>
 
   <div class="row-between mb-16 wrap gap-12 no-print">
-    ${chipbar([['all', '全部', all.length], ['active', '現役', all.filter(m => m.status === 'active').length],
-      ['leave', '休假', all.filter(m => m.status === 'leave').length], ['alumni', '舊團員', all.filter(m => m.status === 'alumni').length]], statusFilter, 'data-status')}
+    <div class="col gap-8" style="min-width:0">
+      ${chipbar([['all', '全部身份', all.length], ['leader', '領袖', cnt('leader')], ['exco', '執委', cnt('exco')], ['member', '團員', cnt('member')]], idFilter, 'data-ident')}
+      ${chipbar([['all', '全部狀態', all.length], ['active', '現役', all.filter(m => m.status === 'active').length],
+        ['leave', '休假', all.filter(m => m.status === 'leave').length], ['alumni', '舊團員', all.filter(m => m.status === 'alumni').length]], statusFilter, 'data-status')}
+    </div>
     <div class="search-wrap">
       <span class="ic">${icon('search', 15)}</span>
-      <input class="input" id="mSearch" placeholder="搜尋姓名／職位／電話…" value="${esc(kw)}">
+      <input class="input" id="mSearch" placeholder="搜尋姓名／身份／職位／電話…" value="${esc(kw)}">
     </div>
   </div>
 
   <div class="card">
     ${list.length ? `<div class="scroll-x"><table class="table">
       <thead><tr>
-        <th>團員</th><th>職位</th><th>生日</th><th class="center">年齡</th>
+        <th>用戶</th><th>身份</th><th>職位</th><th>生日</th><th class="center">年齡</th>
         <th class="center">出席率</th><th class="center">收費</th><th>狀態</th><th></th>
       </tr></thead>
       <tbody>${list.map(m => {
@@ -104,6 +134,7 @@ function listView() {
         return `<tr style="cursor:pointer" data-open="${m.id}">
           <td><div class="row gap-10">${avatar(m.name)}
             <div><div class="semibold">${esc(m.name)}</div><div class="xs faint">${esc(m.eng || '')}</div></div></div></td>
+          <td><span class="badge ${IDENTITIES[identityOf(m)].c}"><span class="dot"></span>${esc(identityLabel(m))}</span></td>
           <td><div class="sm">${esc(m.role || '—')}</div>
             ${(m.tags || []).length ? `<div class="row gap-4 mt-4 wrap">${m.tags.map(t => `<span class="tag">${esc(t)}</span>`).join('')}</div>` : ''}</td>
           <td class="mono sm">${p ? `${Number(p.md.slice(0, 2))}/${Number(p.md.slice(3))}${p.hasYear ? ` <span class="faint">(${p.y})</span>` : ' <span class="faint">(年份待補)</span>'}` : '<span class="faint">未填</span>'}
@@ -118,10 +149,12 @@ function listView() {
             ? `<span class="badge b-danger">欠 ${unpaid.length} 筆</span>`
             : `<span class="badge b-ok"><span class="dot"></span>已清</span>`) : '<span class="faint xs">—</span>'}</td>
           <td><span class="badge ${S[m.status]?.c || 'b-grey'}"><span class="dot"></span>${S[m.status]?.l || m.status}</span></td>
-          <td class="right">${icon('chevronR', 15)}</td>
+          <td class="right">${can('member.edit')
+            ? `<button class="btn btn-xs" data-edit="${m.id}">${icon('edit', 13)} 編輯</button>`
+            : icon('chevronR', 15)}</td>
         </tr>`;
       }).join('')}</tbody>
-    </table></div>` : empty('users', '搵唔到團員', '試下清除搜尋或篩選條件')}
+    </table></div>` : empty('users', '搵唔到用戶', '試下清除搜尋或篩選條件')}
   </div>`;
 }
 
@@ -211,7 +244,7 @@ function detail(id) {
   return `
   ${pageHead({
     title: m.name,
-    sub: `${m.eng || ''}${m.eng ? ' · ' : ''}${m.role || '未有職位'} · ${memberStatus()[m.status]?.l || ''}`,
+    sub: `${identityLabel(m)}${m.role ? ' · ' + m.role : ''}${m.eng ? ' · ' + m.eng : ''} · ${memberStatus()[m.status]?.l || ''}`,
     actions: `
       <button class="btn btn-sm" data-go="#/members">${icon('chevronL', 15)} 返回名冊</button>
       ${can('member.edit') ? `<button class="btn btn-sm btn-primary" data-act="edit" data-id="${m.id}">${icon('edit', 15)} 編輯</button>` : ''}`
@@ -227,7 +260,14 @@ function detail(id) {
         <div style="padding:18px">
           ${kv([
             ['姓名', `<b>${esc(m.name)}</b>`],
+            ['身份', `<span class="badge ${IDENTITIES[identityOf(m)].c}"><span class="dot"></span>${esc(identityLabel(m))}</span>`],
             ['英文名', esc(m.eng || '—')],
+            ['會籍編號（YMIS）', m.ymis
+              ? `<span class="semibold" style="font-family:var(--mono)">${esc(m.ymis)}</span> <span class="tag brand">可對應進度系統</span>`
+              : (expectedKeyKind(m) === 'ymis'
+                ? '<span style="color:var(--warn)">未填 —— 團員／執委要有 YMIS 先可以同進度系統對上</span>'
+                : '<span class="faint">領袖用 Email 對應，YMIS 可以留空</span>')],
+            ['系統 ID', `<span class="xs faint" style="font-family:var(--mono)">${esc(m.systemId || '—')}</span>`],
             ['生日', `${esc(memberBirthdayText(m))}${ageFrom(m.birthday) !== null ? ` · ${ageFrom(m.birthday)} 歲` : ''}`],
             ['職位', esc(m.role || '—')],
             ['聯絡電話', esc(m.phone || '—')],
@@ -292,7 +332,7 @@ function detail(id) {
         </div>
       </div>` : ''}
 
-      ${can('member.delete') ? `<button class="btn btn-danger btn-block" data-act="del" data-id="${m.id}">${icon('trash', 15)} 刪除此團員</button>` : ''}
+      ${can('member.delete') ? `<button class="btn btn-danger btn-block" data-act="del" data-id="${m.id}">${icon('trash', 15)} 刪除此用戶</button>` : ''}
     </div>
   </div>`;
 }
@@ -302,39 +342,57 @@ function detail(id) {
    ============================================================ */
 function editor(id) {
   const m = id ? member(id) : null;
+  const ident = m ? identityOf(m) : 'member';
   return `
-  ${pageHead({ title: m ? `編輯：${m.name}` : '新增團員',
-    sub: '生日可以只填月日（例：03-26），亦可以填完整日期（例：2010-03-26）',
+  ${pageHead({ title: m ? `編輯：${m.name}` : '新增用戶',
+    sub: '身份（領袖 / 執委 / 團員）同資料都可以改；生日可以只填月日（例：03-26）',
     actions: `<button class="btn btn-sm" data-act="cancel">${icon('chevronL', 15)} 取消</button>` })}
+  ${draftBanner('member', id || 'new', '用戶資料')}
   <div class="card" style="max-width:760px">
     <div style="padding:20px">
       <div class="grid g-2" style="gap:14px">
         <div class="field"><label class="label">姓名 <span class="req">*</span></label>
-          <input class="input" id="f-name" value="${esc(m?.name || '')}" placeholder="例：陳大文"></div>
+          <input class="input" id="f-name" data-draft="name" value="${esc(m?.name || '')}" placeholder="例：陳大文"></div>
+        <div class="field"><label class="label">身份 <span class="req">*</span></label>
+          <select class="select" id="f-identity" data-draft="identity">
+            ${Object.entries(IDENTITIES).map(([k, v]) => `<option value="${k}" ${ident === k ? 'selected' : ''}>${v.l}</option>`).join('')}
+          </select>
+          <div class="hint">領袖 / 執委 / 團員 —— 決定佢喺系統入面嘅身份。</div></div>
         <div class="field"><label class="label">英文名</label>
-          <input class="input" id="f-eng" value="${esc(m?.eng || '')}" placeholder="例：Chan Tai Man"></div>
+          <input class="input" id="f-eng" data-draft="eng" value="${esc(m?.eng || '')}" placeholder="例：Chan Tai Man"></div>
+        <div class="field"><label class="label">會籍編號（YMIS）</label>
+          <input class="input" id="f-ymis" data-draft="ymis" value="${esc(m?.ymis || '')}" placeholder="同進度追蹤系統一樣嗰個">
+          <div class="hint">跨系統對人用嘅<b>權威 key</b>。填咗，進度追蹤等外部系統先可以準確認到呢個人（唔使靠姓名）。</div></div>
+        <div class="field"><label class="label">系統 ID（自動產生，唔好改）</label>
+          <input class="input" value="${esc(m?.systemId || '（儲存時自動產生）')}" readonly style="font-family:var(--mono);font-size:12px;background:var(--bg-2)">
+          <div class="hint">冇 YMIS 時嘅 fallback；一旦產生就唔會再改。</div></div>
+        <div class="field"><label class="label">職位（團內）</label>
+          <input class="input" id="f-role" data-draft="role" value="${esc(m?.role || '')}" placeholder="例：主席 / 司庫 / 小隊長"></div>
         <div class="field"><label class="label">出生日期（生日）</label>
-          <input class="input" id="f-birthday" value="${esc(m?.birthday || '')}" placeholder="YYYY-MM-DD 或 MM-DD">
+          <input class="input" id="f-birthday" data-draft="birthday" value="${esc(m?.birthday || '')}" placeholder="YYYY-MM-DD 或 MM-DD">
           <div class="hint">用嚟做生日提示同生日表；未確定年份可以只填 MM-DD。</div></div>
-        <div class="field"><label class="label">職位</label>
-          <input class="input" id="f-role" value="${esc(m?.role || '')}" placeholder="例：主席 / 司庫 / 隊員"></div>
         <div class="field"><label class="label">電話</label>
-          <input class="input" id="f-phone" value="${esc(m?.phone || '')}" placeholder="9xxx xxxx"></div>
+          <input class="input" id="f-phone" data-draft="phone" value="${esc(m?.phone || '')}" placeholder="9xxx xxxx"></div>
         <div class="field"><label class="label">電郵</label>
-          <input class="input" id="f-email" value="${esc(m?.email || '')}"></div>
+          <input class="input" id="f-email" data-draft="email" value="${esc(m?.email || '')}"></div>
         <div class="field"><label class="label">入團日期</label>
-          <input class="input" id="f-join" value="${esc(m?.join || '')}" placeholder="YYYY-MM-DD"></div>
+          <input class="input" id="f-join" data-draft="join" value="${esc(m?.join || '')}" placeholder="YYYY-MM-DD"></div>
         <div class="field"><label class="label">狀態</label>
-          <select class="select" id="f-status">
+          <select class="select" id="f-status" data-draft="status">
             ${Object.entries(memberStatus()).map(([k, v]) => `<option value="${k}" ${m?.status === k ? 'selected' : ''}>${v.l}</option>`).join('')}
           </select></div>
         <div class="field"><label class="label">標籤（用逗號分隔）</label>
-          <input class="input" id="f-tags" value="${esc((m?.tags || []).join(', '))}" placeholder="執委會, 小隊"></div>
+          <input class="input" id="f-tags" data-draft="tags" value="${esc((m?.tags || []).join(', '))}" placeholder="執委會, 小隊"></div>
       </div>
       <div class="field mt-16"><label class="label">備註</label>
-        <textarea class="textarea" id="f-note">${esc(m?.note || '')}</textarea></div>
+        <textarea class="textarea" id="f-note" data-draft="note">${esc(m?.note || '')}</textarea></div>
       <div id="f-err" class="err mt-8"></div>
-      <button class="btn btn-primary mt-16" data-act="save" data-id="${id || ''}">${icon('save', 16)} ${m ? '儲存' : '新增團員'}</button>
+      <div class="hint mb-8" data-draft-stamp></div>
+      <div class="row gap-8 wrap">
+        <button class="btn btn-primary" data-act="save" data-id="${id || ''}">${icon('save', 16)} ${m ? '儲存' : '新增用戶'}</button>
+        <button class="btn" data-act="cancel">${icon('x', 16)} 取消</button>
+      </div>
+      <div class="hint mt-8">未撳「儲存」之前，改動只係暫存喺呢部裝置（瀏覽器），唔會寫入資料庫，更唔會送去總表。</div>
     </div>
   </div>`;
 }
@@ -343,28 +401,30 @@ function editor(id) {
    輸出
    ============================================================ */
 function exportRosterCSV() {
-  const headers = ['姓名', '英文名', '職位', '生日', '年齡', '電話', '電郵', '入團日期', '狀態', '標籤', '備註'];
+  const headers = ['姓名', '英文名', '身份', '職位', '生日', '年齡', '電話', '電郵', '入團日期', '狀態', '標籤', '備註'];
   const rows = members().map(m => [
-    m.name, m.eng || '', m.role || '', m.birthday || '', ageFrom(m.birthday) ?? '',
+    m.name, m.eng || '', identityLabel(m), m.role || '', m.birthday || '', ageFrom(m.birthday) ?? '',
     m.phone || '', m.email || '', m.join || '', memberStatus()[m.status]?.l || m.status,
     (m.tags || []).join(' '), m.note || ''
   ]);
-  toCSV({ filename: `團員名冊_${stamp()}.csv`, headers, rows });
+  toCSV({ filename: `用戶名冊_${stamp()}.csv`, headers, rows });
 }
 
 function rosterWord() {
   const rows = members().map(m => `<tr>
-    <td>${esc(m.name)}</td><td>${esc(m.role || '')}</td>
+    <td>${esc(m.name)}</td><td>${esc(identityLabel(m))}</td><td>${esc(m.role || '')}</td>
     <td>${esc(m.birthday || '')}</td><td class="num">${ageFrom(m.birthday) ?? ''}</td>
     <td>${esc(m.phone || '')}</td><td>${esc(m.join || '')}</td>
     <td>${esc(memberStatus()[m.status]?.l || '')}</td></tr>`).join('');
+  const all = members();
+  const cnt = k => all.filter(m => identityOf(m) === k).length;
   toWord({
-    filename: `團員名冊_${stamp()}.doc`,
-    title: '團員名冊',
+    filename: `用戶名冊_${stamp()}.doc`,
+    title: '用戶名冊',
     org: profile().name,
-    bodyHtml: `<div class="doc-head"><div class="doc-title">團員名冊</div>
-      <div class="doc-sub">${esc(profile().name || '')} · 共 ${members().length} 人 · 列印日期 ${todayISO()}</div></div>
-      <table><thead><tr><th>姓名</th><th>職位</th><th>出生日期</th><th class="num">年齡</th><th>電話</th><th>入團</th><th>狀態</th></tr></thead>
+    bodyHtml: `<div class="doc-head"><div class="doc-title">用戶名冊</div>
+      <div class="doc-sub">${esc(profile().name || '')} · 共 ${all.length} 位（領袖 ${cnt('leader')} · 執委 ${cnt('exco')} · 團員 ${cnt('member')}）· 列印日期 ${todayISO()}</div></div>
+      <table><thead><tr><th>姓名</th><th>身份</th><th>職位</th><th>出生日期</th><th class="num">年齡</th><th>電話</th><th>入團</th><th>狀態</th></tr></thead>
       <tbody>${rows}</tbody></table>`
   });
 }
@@ -434,10 +494,31 @@ function exportBirthdayIcs() {
 /* ============================================================
    mount
    ============================================================ */
-export function mount(root) {
+export function mount(root, params = {}) {
   root.querySelectorAll('[data-go]').forEach(el => el.addEventListener('click', () => go(el.dataset.go)));
 
   root.querySelectorAll('[data-status]').forEach(b => b.addEventListener('click', () => { statusFilter = b.dataset.status; refresh(); }));
+  root.querySelectorAll('[data-ident]').forEach(b => b.addEventListener('click', () => { idFilter = b.dataset.ident; refresh(); }));
+  root.querySelectorAll('[data-edit]').forEach(b => b.addEventListener('click', e => {
+    e.stopPropagation();
+    go('#/members/edit/' + b.dataset.edit);
+  }));
+
+  /* 編輯器：草稿先暫存喺瀏覽器（防呆） */
+  if (params.id === 'edit' || params.id === 'new') {
+    const draftId = params.action || 'new';
+    bindDraftAutosave(root, 'member', draftId);
+    root.querySelector('[data-draft-restore]')?.addEventListener('click', () => {
+      applyDraft(root, 'member', draftId);
+      toast('已還原暫存嘅內容', 'ok');
+      root.querySelector('[data-draft-banner]')?.remove();
+    });
+    root.querySelector('[data-draft-discard]')?.addEventListener('click', () => {
+      clearDraft('member', draftId);
+      toast('已放棄暫存', 'ok');
+      refresh();
+    });
+  }
   root.querySelectorAll('[data-month]').forEach(b => b.addEventListener('click', () => { bdayMonth = Number(b.dataset.month); refresh(); }));
   const s = root.querySelector('#mSearch');
   if (s) {
@@ -453,7 +534,7 @@ export function mount(root) {
     const id = el.dataset.id;
 
     if (act === 'new') return go('#/members/new');
-    if (act === 'edit') return go('#/members/' + id);
+    if (act === 'edit') return go('#/members/edit/' + id);
     if (act === 'cancel') return go('#/members');
     if (act === 'exp-csv') { exportRosterCSV(); toast('已匯出 CSV', 'ok'); }
     if (act === 'exp-word') { rosterWord(); toast('已輸出 Word（.doc）', 'ok'); }
@@ -470,14 +551,34 @@ export function mount(root) {
       const err = root.querySelector('#f-err');
       if (!name) { err.textContent = '請填姓名'; err.style.display = 'block'; return; }
       if (!isValidBirthday(birthday)) { err.textContent = '生日格式唔正確（例：2010-03-26 或 03-26）'; err.style.display = 'block'; return; }
+      const identity = root.querySelector('#f-identity')?.value || 'member';
       const patch = {
-        name, birthday, eng: v('#f-eng'), role: v('#f-role'), phone: v('#f-phone'), email: v('#f-email'),
+        name, birthday, identity, eng: v('#f-eng'), role: v('#f-role'), phone: v('#f-phone'), email: v('#f-email'),
+        ymis: v('#f-ymis'),
         join: v('#f-join'), status: root.querySelector('#f-status').value,
         tags: v('#f-tags').split(',').map(x => x.trim()).filter(Boolean), note: v('#f-note')
       };
-      if (id) { update('members', id, patch); toast('已更新團員資料', 'ok'); }
-      else { const rec = add('members', { ...patch, id: uid('m') }); toast('已新增團員', 'ok'); }
-      go('#/members');
+      /* 同名防呆：唔好一時手誤開多一個同一個人 */
+      const dup = members().find(m => m.id !== id && String(m.name).trim() === name);
+      if (dup && !(await confirmDlg({
+        title: '已經有同名用戶', okText: '照樣儲存',
+        message: `名冊入面已經有 <b>${esc(name)}</b>（${esc(identityLabel(dup))}）。如果係同一個人，請返回改用「編輯」。`
+      }))) return;
+
+      if (id) {
+        const before = { ...member(id) };
+        update('members', id, patch);
+        clearDraft('member', id);
+        toast(`已儲存 ${name}（${IDENTITIES[identity].l}）`, 'ok');
+        undoable('（可以撳「還原」復原今次改動）', () => { update('members', id, before); refresh(); });
+        go('#/members/' + id);
+      } else {
+        const nid = uid('m');
+        const rec = add('members', { ...patch, id: nid, systemId: newSystemId(load().unitCode, nid) });
+        clearDraft('member', 'new');
+        toast(`已新增 ${name}（${IDENTITIES[identity].l}）`, 'ok');
+        go('#/members/' + rec.id);
+      }
     }
 
     if (act === 'save-note') {
@@ -492,10 +593,24 @@ export function mount(root) {
 
     if (act === 'del') {
       const m = member(id);
-      if (await confirmDlg({
-        title: '刪除團員', danger: true, okText: '確定刪除',
-        message: `確定刪除 <b>${esc(m?.name || '')}</b>？佢嘅出席紀錄會保留但名字會顯示為「—」。`
-      })) { remove('members', id); toast('已刪除', 'ok'); go('#/members'); }
+      if (!m) return;
+      const okDel = await confirmDanger({
+        title: '刪除用戶', okText: '確定刪除', requireText: m.name,
+        message: `確定刪除 <b>${esc(m.name)}</b>（${esc(identityLabel(m))}）？<br>
+          佢嘅出席紀錄會保留但名字會顯示為「—」。<br>
+          <span class="xs faint">删除只會改呢部裝置嘅資料庫；已經同步咗去總表嘅資料要另外處理。</span>`
+      });
+      if (!okDel) return;
+      const snapshot = { ...m };
+      const idx = Math.max(0, members().findIndex(x => x.id === id));
+      remove('members', id);
+      clearDraft('member', id);
+      undoable(`已刪除 ${m.name}`, () => {
+        const list = collection('members');
+        list.splice(Math.min(idx, list.length), 0, snapshot);
+        commit(); refresh();
+      });
+      go('#/members');
     }
   }));
 }

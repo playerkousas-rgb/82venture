@@ -5,7 +5,7 @@
 
 import { load, collection, find } from './store.js';
 import { todayISO, parseBirthday, daysUntilBirthday, ageFrom, turningAge } from './dates.js';
-import { agmIsDefault, unitFYOf, scoutFYLabel } from './fiscal.js';
+import { agmIsDefault, unitFYOf, scoutFYLabel, scoutFYRange, inRange } from './fiscal.js';
 export * from './fiscal.js';
 
 /* ---------------- 基本 ---------------- */
@@ -15,6 +15,56 @@ export function currency() { return settings().currency || 'HK$'; }
 export function money(n) {
   const v = Number(n) || 0;
   return currency() + v.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+}
+
+/* ---------------- 公開頁連結（成員免登入用） ----------------
+   entry.html      手機記一筆（收支申報）
+   borrow.html     物資借用申請
+   notice.html     通告 + 回覆出席與否
+   constitution.html 團章
+   全部都可以喺「帳號與系統 → 旅團設定」或者「成員連結」頁改做自己嘅網址。 */
+export function publicPageUrl(file, params = {}) {
+  const s = settings().publicLinks || {};
+  const origin = (typeof location !== 'undefined' && location.origin && location.origin !== 'null')
+    ? location.origin + String(location.pathname).replace(/[^/]*$/, '')
+    : '';
+  const target = s[file] || s.base || (origin ? origin + file : file);
+  let url;
+  try { url = new URL(target, origin || undefined); }
+  catch { return target; }
+  Object.entries(params).forEach(([k, v]) => {
+    if (v !== undefined && v !== null && v !== '') url.searchParams.set(k, v);
+  });
+  return url.toString();
+}
+/** 成員用嘅公開連結清單（「成員連結」頁同 QR 都用呢個） */
+export function memberLinks() {
+  const code = load().unitCode;
+  const out = [
+    {
+      id: 'entry', icon: 'camera', label: '收支申報（手機記一筆）',
+      desc: '成員影相 → 揀欄目 → 金額 → 送出，司庫批核後自動入帳（取代 Google Form）',
+      url: publicPageUrl('entry.html', { u: code })
+    },
+    {
+      id: 'borrow', icon: 'grid', label: '物資借用申請',
+      desc: '成員自己申請借物資，執委喺 APP 批核；借出／歸還自動加減庫存',
+      url: publicPageUrl('borrow.html', { u: code })
+    },
+    {
+      id: 'constitution', icon: 'book', label: '團章（公開閱讀）',
+      desc: '免登入閱讀最新版團章，可輸出 Word / PDF',
+      url: publicPageUrl('constitution.html', { u: code })
+    }
+  ];
+  collection('notices').filter(n => n.status === 'published').slice(0, 40).forEach(n => {
+    out.push({
+      id: 'notice:' + n.id, icon: 'megaphone', label: `通告：${n.title?.zh || n.id}`,
+      desc: `免登入閱讀${n.needSignup ? '＋回覆出席與否' : ''}${n.deadline ? `（截止 ${n.deadline}）` : ''}`,
+      url: publicPageUrl('notice.html', { u: code, n: n.id })
+    });
+  });
+  return out;
 }
 
 /* ---------------- 會議 ---------------- */
@@ -38,11 +88,106 @@ export function statusBadge(s) {
   return `<span class="badge ${m.cls}"><span class="dot"></span>${m.label}</span>`;
 }
 
-/* ---------------- 團員 ---------------- */
+/* ---------------- 團員 / 用戶 ---------------- */
+/**
+ * 身份（呢個系統管嘅係「用戶」：領袖、執委、團員都可能喺名冊入面）
+ * identity = 系統身份（決定權限層級、顯示）
+ * role     = 團內職位（自由文字，例：主席 / 司庫 / 小隊長）
+ */
+export const IDENTITIES = {
+  leader: { l: '領袖', short: '領袖', c: 'b-brand', level: 3 },
+  exco:   { l: '執委', short: '執委', c: 'b-info', level: 2 },
+  member: { l: '團員', short: '團員', c: 'b-grey', level: 1 }
+};
+export function identityLabel(m) {
+  const k = m?.identity || 'member';
+  return (IDENTITIES[k] || IDENTITIES.member).l;
+}
+export function identityOf(m) {
+  const k = m?.identity || 'member';
+  return IDENTITIES[k] ? k : 'member';
+}
+/** 由舊資料／職位文字推算身份（升級舊資料庫用） */
+export function guessIdentity(m) {
+  if (m?.identity && IDENTITIES[m.identity]) return m.identity;
+  const t = `${m?.role || ''} ${(m?.tags || []).join(' ')}`.toLowerCase();
+  if (/(團長|領袖|leader|scouter|隊長)/.test(t)) return 'leader';
+  if (/(執委|執行委員會|exco|committee|主席|司庫|文書)/.test(t)) return 'exco';
+  return 'member';
+}
+export function membersByIdentity(k) { return members().filter(m => identityOf(m) === k); }
+
 export function members() { return collection('members'); }
 export function member(id) { return find('members', id); }
 export function memberName(id) { return member(id)?.name || '—'; }
 export function activeMembers() { return members().filter(m => m.status !== 'alumni'); }
+
+/* ---------- 跨系統身份 key（同進度追蹤等外部系統對人用） ----------
+   對方（VSBADGE）嘅身份規則：**成員用 YMIS（10 位數字），領袖用 Email**。
+   （佢登入頁：「成員：YMIS 10位數字 + 密碼；領袖：Email + 密碼」）
+   所以唔可以一刀切要求所有人都有 YMIS —— 領袖本來就唔會有，
+   把領袖當「未填 YMIS」係計錯。呢度按身份揀啱嘅 key。 */
+
+/** 呢位用戶**應該**用邊種外部 key（領袖→email，其他→ymis） */
+export function expectedKeyKind(m) { return identityOf(m) === 'leader' ? 'email' : 'ymis'; }
+
+/** 用戶嘅跨系統 key（按身份揀：領袖 email 優先，團員／執委 YMIS 優先） */
+export function memberKey(m) {
+  const ymis = String(m?.ymis || '').trim();
+  const email = String(m?.email || '').trim().toLowerCase();
+  const order = expectedKeyKind(m) === 'email'
+    ? [['email', email], ['ymis', ymis]]
+    : [['ymis', ymis], ['email', email]];
+  for (const [kind, v] of order) if (v) return { key: v, kind };
+  const sys = String(m?.systemId || '').trim();
+  if (sys) return { key: sys, kind: 'systemId' };   // 對方認唔到，只係本系統 fallback
+  return { key: '', kind: '' };
+}
+/**
+ * 名冊嘅身份 key 覆蓋率。
+ * 「對得上」＝有對方認得嘅 key（團員有 YMIS / 領袖有 Email）。
+ * systemId 只係本系統 fallback，對方認唔到，所以唔算「對得上」。
+ */
+export function keyCoverage(list = members()) {
+  const total = list.length;
+  const leaders = list.filter(m => identityOf(m) === 'leader');
+  const youth = list.filter(m => identityOf(m) !== 'leader');
+  const withYmis = list.filter(m => String(m.ymis || '').trim()).length;
+  const withEmail = list.filter(m => String(m.email || '').trim()).length;
+  const withSystemId = list.filter(m => String(m.systemId || '').trim()).length;
+  const youthOk = youth.filter(m => String(m.ymis || '').trim());
+  const leaderOk = leaders.filter(m => String(m.email || '').trim());
+  const matched = youthOk.length + leaderOk.length;
+  const unmatched = total - matched;
+  const pct = (n, d) => (d ? Math.round((n / d) * 100) : 0);
+  return {
+    total, withYmis, withEmail, withSystemId,
+    youthTotal: youth.length, leaderTotal: leaders.length,
+    youthWithYmis: youthOk.length, leaderWithEmail: leaderOk.length,
+    matched, unmatched,
+    /** 整體「對方認得到」嘅比例 */
+    percent: pct(matched, total),
+    youthPercent: pct(youthOk.length, youth.length),
+    leaderPercent: pct(leaderOk.length, leaders.length),
+    /** 兼容舊寫法：團員嘅 YMIS 覆蓋率 */
+    ymisPercent: pct(youthOk.length, youth.length),
+    ready: total > 0 && unmatched === 0,
+    /** 未對得上嘅人（用嚟列出嚟提示補返） */
+    unmatchedList: list.filter(m => {
+      const need = expectedKeyKind(m);
+      return !(need === 'email' ? String(m.email || '').trim() : String(m.ymis || '').trim());
+    }).map(m => ({ id: m.id, name: m.name, identity: identityOf(m), need: expectedKeyKind(m) }))
+  };
+}
+/** 用 key 搵人（YMIS / Email / systemId） */
+export function findByKey(key) {
+  const k = String(key || '').trim();
+  if (!k) return null;
+  const kl = k.toLowerCase();
+  return members().find(m => String(m.ymis || '').trim() === k
+    || String(m.email || '').trim().toLowerCase() === kl
+    || String(m.systemId || '').trim() === k) || null;
+}
 export function memberStatus() {
   return { active: { l: '現役', c: 'b-ok' }, leave: { l: '休假', c: 'b-warn' }, alumni: { l: '舊團員', c: 'b-grey' } };
 }
@@ -131,14 +276,126 @@ export function categoryBreakdown(list, type) {
   });
   return Object.entries(map).sort((a, b) => b[1] - a[1]);
 }
-export function openingBalance() {
+/* ============================================================
+   期初結餘（逐年）
+   ------------------------------------------------------------
+   每一個財政年度都有自己嘅期初結餘：
+     2025-26 期初 8,803.28 → 期末 7,846.64
+     2026-27 期初 7,846.64（= 上年度期末）→ 加減本年度收支 = 現在結餘
+   所以「期初結餘」唔可以得一個全域數字，否则會把上年度嘅期初
+   當成本年度嘅期初（見 2026-09-15 修正）。
+
+   來源優先次序：
+     1) settings.openingBalances[年度]      ← 明確填咗嘅（例：2026-27 = 7846.64）
+     2) 結轉：全期起點 + 該年度開始前所有帳目   ← 有舊帳就自動計到
+   ============================================================ */
+
+/** 全期起點（舊欄位，即「由頭開始嗰陣有幾多錢」） */
+export function legacyOpening() { return Number(settings().openingBalance || 0); }
+
+/** 明確設定咗嘅逐年期初結餘表 { '2026-27': 7846.64 } */
+export function openingBalances() { return settings().openingBalances || {}; }
+
+/** 而家所屬嘅年度（童軍年度 4/1–3/31；同旅年度標籤一致時最簡單） */
+export function currentFY() {
   const s = settings();
-  return { amount: Number(s.openingBalance || 0), date: s.openingBalanceDate || '' };
+  return scoutFYLabel(todayISO(), Number(s.scoutFYStartMonth || 4));
 }
-/** 某段期間嘅結餘（期初 + 期間收入 − 期間支出） */
-export function balanceAt(startISO) {
-  const before = tx().filter(t => String(t.date) < startISO);
-  return openingBalance().amount + balance(before);
+export function currentFYRange() {
+  const s = settings();
+  return scoutFYRange(currentFY(), Number(s.scoutFYStartMonth || 4), Number(s.scoutFYStartDay || 1));
+}
+/** 上一個年度標籤（例：2026-27 → 2025-26） */
+export function prevFYKey(yearKey = currentFY()) {
+  const y = Number(String(yearKey).split('-')[0]);
+  return `${y - 1}-${pad2y(y % 100)}`;
+}
+function pad2y(n) { return String(n).padStart(2, '0'); }
+
+/** 結轉：某年度開始之前嘅累計（全期起點 + 之前所有帳目） */
+export function carriedForward(startISO) {
+  const before = tx().filter(t => String(t.date).slice(0, 10) < startISO);
+  return legacyOpening() + balance(before);
+}
+/** 某段期間嘅結餘（全期起點 + 該日之前所有帳目） */
+export function balanceAt(startISO) { return carriedForward(startISO); }
+
+/**
+ * 某年度嘅期初結餘。
+ * @param {string} yearKey 例 '2026-27'（預設＝本年度）
+ * @param {object} [range] 該年度範圍（冇傳就用童軍年度計）
+ */
+export function openingOf(yearKey = currentFY(), range = null) {
+  const map = openingBalances();
+  if (map[yearKey] !== undefined && map[yearKey] !== null && map[yearKey] !== '') {
+    return { amount: Number(map[yearKey]), year: yearKey, explicit: true, date: (range || yearRange(yearKey)).start };
+  }
+  const r = range || yearRange(yearKey);
+  return { amount: carriedForward(r.start), year: yearKey, explicit: false, date: r.start };
+}
+/** 由年度標籤攞範圍（童軍年度） */
+export function yearRange(yearKey) {
+  const s = settings();
+  return scoutFYRange(yearKey, Number(s.scoutFYStartMonth || 4), Number(s.scoutFYStartDay || 1));
+}
+
+/** 兼容舊寫法：而家回傳「本年度」嘅期初結餘（唔再係全域單一數字） */
+export function openingBalance() {
+  const o = openingOf();
+  return { amount: o.amount, date: o.date, year: o.year, explicit: o.explicit };
+}
+
+/* ---------- 現在結餘（首頁顯示用） ----------
+   現在結餘 = **本年度**期初結餘 + **本年度**收入 − **本年度**支出。
+   上年度嘅帳目已經計入「上年度期末 → 本年度期初」，唔會重複加。 */
+export function currentBalance() {
+  const r = currentFYRange();
+  const o = openingOf(r.key, r);
+  const rows = tx().filter(t => inRange(t.date, r.start, r.end));
+  return o.amount + balance(rows);
+}
+/** 結餘拆解（本年度），用嚟顯示同解釋負數 */
+export function balanceBreakdown() {
+  const s = settings();
+  const r = currentFYRange();
+  const list = tx().filter(t => inRange(t.date, r.start, r.end));
+  const inc = sumBy(list, 'income');
+  const exp = sumBy(list, 'expense');
+  const o = openingOf(r.key, r);
+  const now = o.amount + inc - exp;
+  const prevKey = prevFYKey(r.key);
+  const prevRange = yearRange(prevKey);
+  const prevRows = tx().filter(t => inRange(t.date, prevRange.start, prevRange.end));
+  const prev = openingOf(prevKey, prevRange);
+  const ref = load().reference || {};
+  const refOpen = Number(ref.openingBalance || 0);
+  const refInc = sumBy(ref.transactions || [], 'income');
+  const refExp = sumBy(ref.transactions || [], 'expense');
+  const refClose = ref.check?.closing ?? (refOpen + refInc - refExp);
+  return {
+    year: r.key, range: r,
+    opening: o.amount, openingDate: o.date, openingExplicit: o.explicit,
+    income: inc, expense: exp, now, count: list.length,
+    hasOpening: o.explicit || legacyOpening() !== 0,
+    /** 上年度（用嚟對數：上年度期末應該等於本年度期初） */
+    prevYear: prevKey, prevOpening: prev.amount,
+    prevClosing: prev.amount + balance(prevRows), prevCount: prevRows.length,
+    /** 舊帳參考（你嘅 Google Sheet 分頁） */
+    referenceOpening: refOpen, referenceClosing: Number(refClose) || 0,
+    referenceYear: refYearKey(ref),
+    likelyMissingOpening: now < 0 && !o.explicit && legacyOpening() === 0 && refOpen > 0,
+    /** 有舊帳參考但未入帳 → 提示去匯入 */
+    hasUnimportedReference: (ref.transactions || []).length > 0 && tx().length === 0,
+    /** 本年度期初 同 舊帳期末 唔同 → 提示核對 */
+    openingMismatch: o.explicit && refOpen > 0 && Math.abs(o.amount - Number(refClose)) > 0.005,
+    scoutFYStartMonth: Number(s.scoutFYStartMonth || 4)
+  };
+}
+/** 由參考資料推算佢屬於邊個年度（由帳目日期計，唔靠分頁名） */
+export function refYearKey(ref = load().reference || {}) {
+  const dates = (ref.transactions || []).map(t => String(t.date).slice(0, 10)).filter(Boolean).sort();
+  if (!dates.length) return '';
+  return scoutFYLabel(dates[dates.length - 1], Number(settings().scoutFYStartMonth || 4));
 }
 export function pendingClaims() { return claims().filter(c => (c.status || 'pending') === 'pending'); }
 

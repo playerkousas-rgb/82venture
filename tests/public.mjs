@@ -263,6 +263,110 @@ function bootEntry(search) {
   ok('成功畫面有「複製內容」傳送畀司庫', !!d.querySelector('[data-pe="copy"]'));
 }
 
+/* ============================================================
+   物資借用（borrow.html + assets/js/public-borrow.js）
+   成員免登入：揀物資 → 數量 → 用途 → 送出
+   ============================================================ */
+console.log('\n▌物資借用（免登入・揀物資＋數量）');
+
+function bootBorrow(search, { remapMock = false } = {}) {
+  const html = fs.readFileSync(path.join(ROOT, 'borrow.html'), 'utf8');
+  const dom4 = new JSDOM(html, {
+    url: 'http://localhost:8080/borrow.html' + search,
+    pretendToBeVisual: true, runScripts: 'dangerously'
+  });
+  const w = dom4.window;
+  w.scrollTo = () => {};
+  for (const k of ['window', 'document', 'navigator', 'localStorage', 'location', 'HTMLElement',
+    'CustomEvent', 'Event', 'Node', 'getComputedStyle', 'URL', 'URLSearchParams', 'Blob']) {
+    if (w[k] === undefined) continue;
+    try { Object.defineProperty(globalThis, k, { value: w[k], configurable: true, writable: true }); }
+    catch (e) { /* 唯讀 → 略過 */ }
+  }
+  globalThis.window = w;
+  if (remapMock) {
+    /* 示範旅團嘅資料喺 data/mock/（唔係 data/units/MOCK/） */
+    const base = globalThis.fetch;
+    globalThis.fetch = (url) => base(String(url).replace('data/units/MOCK/', 'data/mock/'));
+  }
+  return w;
+}
+
+// ① 有物資嘅旅團（用示範資料）
+{
+  const w = bootBorrow('?u=MOCK', { remapMock: true });
+  await import('../assets/js/public-borrow.js?case=' + ++noticeCase);
+  await wait(400);
+  const d = w.document;
+  const txt = () => d.getElementById('app')?.textContent || '';
+  ok('物資借用頁有渲染（免登入）', txt().length > 200, String(txt().length));
+  ok('顯示旅團名', txt().includes('示範') || txt().includes('MOCK'), txt().slice(0, 80));
+  ok('列出可借物資（帶可用數量）', d.querySelectorAll('[data-item]').length >= 5,
+    String(d.querySelectorAll('[data-item]').length));
+  ok('顯示可用數量（總數減借出）', /可用 \d/.test(txt()), txt().slice(0, 200));
+  ok('有數量／借用日／歸還日／用途欄',
+    ['pb-qty', 'pb-from', 'pb-to', 'pb-purpose', 'pb-name'].every(id => !!d.getElementById(id)));
+  ok('有聯絡電話欄', !!d.getElementById('pb-contact'));
+
+  // 未揀物資 → 唔會送出
+  d.getElementById('pb-form').dispatchEvent(new w.Event('submit', { bubbles: true, cancelable: true }));
+  await wait(120);
+  ok('未揀物資會提示（唔會送出）', (d.getElementById('pb-err')?.textContent || '').includes('未填'),
+    d.getElementById('pb-err')?.textContent);
+  ok('未送出時本機冇紀錄', !w.localStorage.getItem('venture82.borrow.MOCK'));
+
+  // 揀物資 + 填好 → 送出
+  d.querySelector('[data-item]').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
+  await wait(80);
+  const picked = d.querySelector('[data-item][aria-pressed="true"]');
+  ok('揀咗物資會標示（aria-pressed）', !!picked);
+  d.getElementById('pb-purpose').value = '測試露營';
+  d.getElementById('pb-purpose').dispatchEvent(new w.Event('input', { bubbles: true }));
+  d.getElementById('pb-name').value = '測試團員';
+  d.getElementById('pb-name').dispatchEvent(new w.Event('input', { bubbles: true }));
+  d.getElementById('pb-form').dispatchEvent(new w.Event('submit', { bubbles: true, cancelable: true }));
+  await wait(320);
+
+  const rows = JSON.parse(w.localStorage.getItem('venture82.borrow.MOCK') || '[]');
+  ok('填好之後送出成功（本機有紀錄）', rows.length === 1, String(rows.length));
+  ok('紀錄有物資名／數量／用途／申請人',
+    !!rows[0]?.payload?.itemName && rows[0]?.payload?.qty === 1
+    && rows[0]?.payload?.purpose === '測試露營' && rows[0]?.payload?.byName === '測試團員',
+    JSON.stringify(rows[0]?.payload));
+  ok('送出後有成功畫面', txt().includes('已送出申請'));
+  ok('成功畫面有「複製內容」傳送畀執委', !!d.querySelector('[data-pb="copy"]'));
+
+  // 借超過可用數量 → 擋住
+  const w2 = bootBorrow('?u=MOCK', { remapMock: true });
+  await import('../assets/js/public-borrow.js?case=' + ++noticeCase);
+  await wait(400);
+  const d2 = w2.document;
+  d2.querySelector('[data-item]').dispatchEvent(new w2.MouseEvent('click', { bubbles: true }));
+  await wait(60);
+  d2.getElementById('pb-qty').value = '999';
+  d2.getElementById('pb-qty').dispatchEvent(new w2.Event('input', { bubbles: true }));
+  d2.getElementById('pb-purpose').value = 'x';
+  d2.getElementById('pb-purpose').dispatchEvent(new w2.Event('input', { bubbles: true }));
+  d2.getElementById('pb-name').value = 'y';
+  d2.getElementById('pb-name').dispatchEvent(new w2.Event('input', { bubbles: true }));
+  d2.getElementById('pb-form').dispatchEvent(new w2.Event('submit', { bubbles: true, cancelable: true }));
+  await wait(150);
+  ok('借超過可用數量會擋住（防呆）',
+    /可借數量不足/.test(d2.querySelector('[data-err="qty"]')?.textContent || ''),
+    d2.querySelector('[data-err="qty"]')?.textContent);
+}
+
+// ② 未登記物資嘅旅團（真實 0082 而家未有物資）
+{
+  const w = bootBorrow('?u=0082');
+  await import('../assets/js/public-borrow.js?case=' + ++noticeCase);
+  await wait(400);
+  const d = w.document;
+  const txt = () => d.getElementById('app')?.textContent || '';
+  ok('冇登記物資時有友善提示（唔會白畫面）', /未有登記物資/.test(txt()), txt().slice(0, 90));
+  ok('冇物資時送出掣停用', d.querySelector('button[type="submit"]')?.disabled === true);
+}
+
 /* ---------- 錯誤 ---------- */
 if (errors.length) {
   console.log(`\n捕捉到 ${errors.length} 個 console.error：`);

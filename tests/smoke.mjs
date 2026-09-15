@@ -11,6 +11,7 @@ import { JSDOM } from 'jsdom';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import vm from 'vm';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const MODE = process.argv[2] === 'mock' ? 'mock' : 'real';
@@ -81,7 +82,10 @@ ok('帳戶名單永遠唔會有超管', !db.accounts.some(a => ['sheep', 'super'
 
 if (MODE === 'real') {
   section('真實資料內容');
-  ok('團員 16 人（由生日表內建）', db.members.length === 16, String(db.members.length));
+  ok('團員 17 人（由生日表內建）', db.members.length === 17, String(db.members.length));
+  ok('新團員徐頌學已加入名冊（YMIS 2026036356）',
+    db.members.some(m => m.name === '徐頌學' && m.ymis === '2026036356'),
+    JSON.stringify(db.members.filter(m => m.name === '徐頌學')));
   ok('團章 19 章', (db.constitution.chapters || []).length === 19, String(db.constitution.chapters.length));
   ok('團章有中英對照', !!(db.constitution.chapters[0].heading.zh && db.constitution.chapters[0].heading.en));
   ok('帳目由空白開始（唔會混入示範）', db.transactions.length === 0, String(db.transactions.length));
@@ -221,7 +225,8 @@ const pages = ['#/dashboard', '#/meetings', '#/finance', '#/finance/reports', '#
   '#/notices', '#/notices/new', '#/tables', '#/tables/transactions', '#/tables/invItems',
   '#/tables/notices', '#/tables/source', '#/tables/sync', '#/tables/data',
   '#/admin', '#/admin/perms', '#/admin/unit',
-  '#/admin/data', '#/admin/audit', '#/admin/mock'];
+  '#/admin/data', '#/admin/audit', '#/admin/mock',
+  '#/links', '#/finance/settings', '#/members/new', '#/members/edit/' + store.load().members[0].id];
 for (const p of pages) {
   const before = errors.length;
   try {
@@ -250,6 +255,7 @@ if (MODE === 'mock') {
   await auth.login('leader', 'leader', '8202');
   const txBefore = store.load().transactions.length;
   const openBefore = store.load().settings.openingBalance;
+  const obBefore = JSON.parse(JSON.stringify(store.load().settings.openingBalances || {}));
   window.location.hash = '#/finance/import';
   window.dispatchEvent(new window.HashChangeEvent('hashchange'));
   await new Promise(r => setTimeout(r, 40));
@@ -267,21 +273,39 @@ if (MODE === 'mock') {
 
     const db = store.load();
     ok('匯入 56 筆帳目', db.transactions.length - txBefore === 56, `+${db.transactions.length - txBefore}`);
-    ok('期初結餘已設為 8,803.28', Number(db.settings.openingBalance) === 8803.28, String(db.settings.openingBalance));
-    const inc = db.transactions.reduce((a, t) => a + (t.type === 'income' ? Number(t.amount) : 0), 0);
-    const exp = db.transactions.reduce((a, t) => a + (t.type === 'expense' ? Number(t.amount) : 0), 0);
-    const bal = Math.round((Number(db.settings.openingBalance) + inc - exp) * 100) / 100;
-    ok('匯入後結餘同原表總結一致（7,846.64）', bal === 7846.64, String(bal));
+
+    /* 期初結餘要**逐年**：8,803.28 係 2025-26 嘅期初，唔係 2026-27 嘅期初 */
+    const ob = db.settings.openingBalances || {};
+    ok('2025-26 期初結餘設為 8,803.28（原表「上年度結餘」）',
+      Number(ob['2025-26']) === 8803.28, JSON.stringify(ob));
+    ok('2026-27 期初結餘自動結轉為 7,846.64（＝2025-26 期末）',
+      Number(ob['2026-27']) === 7846.64, JSON.stringify(ob));
+    ok('唔會把上年度期初當成本年度期初',
+      Number(model.openingOf('2026-27').amount) === 7846.64, String(model.openingOf('2026-27').amount));
+    ok('2025-26 期末＝8,803.28＋8,630−9,586.64＝7,846.64（同原表總結一致）',
+      Math.round((model.openingOf('2025-26').amount
+        + model.sumBy(db.transactions.filter(t => model.inRange(t.date, '2025-04-01', '2026-03-31')), 'income')
+        - model.sumBy(db.transactions.filter(t => model.inRange(t.date, '2025-04-01', '2026-03-31')), 'expense')) * 100) / 100 === 7846.64,
+      String(model.openingOf('2025-26').amount));
+    ok('舊帳 56 筆全部屬於 2025-26（冇一筆跌入 2026-27）',
+      db.transactions.filter(t => t.reference).every(t => model.inRange(t.date, '2025-04-01', '2026-03-31')),
+      String(db.transactions.filter(t => t.reference && !model.inRange(t.date, '2025-04-01', '2026-03-31')).length));
+    ok('而家（2026-27）結餘＝本年度期初 7,846.64（本年度未有帳目）',
+      Math.round(model.currentBalance() * 100) / 100 === 7846.64, String(model.currentBalance()));
+    ok('首頁唔會再顯示負數', model.currentBalance() > 0, String(model.currentBalance()));
     ok('單據連結有保留（7 筆）', db.transactions.filter(t => t.receiptLink).length === 7,
       String(db.transactions.filter(t => t.receiptLink).length));
     ok('匯入時順便標記團費已收', db.fees.filter(f => f.paid && String(f.period).includes('2025')).length >= 3,
       JSON.stringify(db.fees.filter(f => f.paid).map(f => `${f.period}:${f.memberId}`)));
 
     // 還原，唔好污染後面嘅測試
-    db.transactions = db.transactions.filter(t => !t.imported);
+    db.transactions = db.transactions.filter(t => !t.imported && !t.reference);
     db.fees = db.fees.filter(f => !String(f.period || '').startsWith('2025'));
     db.settings.openingBalance = openBefore;
+    db.settings.openingBalances = obBefore;
     store.commit();
+    ok('（已還原匯入，唔影響後面測試）',
+      store.load().transactions.length === txBefore, String(store.load().transactions.length));
   }
 }
 
@@ -914,6 +938,582 @@ section('快速記帳（影相＋選欄目）');
   // 設定檔：公開收集頁
   ok('unit.json 有 publicEntry 設定', !!store.load().settings?.publicEntry);
   ok('entry.html 存在（成員手機入口）', typeof fs.readFileSync === 'function' && fs.existsSync(path.join(ROOT, 'entry.html')));
+}
+
+/* ============================================================
+   新增測試（用戶提出嘅 8 項修正）
+   ============================================================ */
+
+/* ---------- 1. Code.gs 語法 ---------- */
+section('Code.gs（Apps Script 範本）');
+{
+  const { gasTemplate, gasGuide } = await import('../assets/js/lib/gastemplate.js');
+  const code = gasTemplate();
+  const lines = code.split('\n');
+  let syntaxError = '';
+  try { new vm.Script(code, { filename: 'Code.gs' }); }
+  catch (e) { syntaxError = e.message + ' @line ' + (e.stack || '').split('\n')[0]; }
+  ok('Code.gs 可以通過語法檢查（無 SyntaxError）', syntaxError === '', syntaxError);
+  ok('冇「字串入面斷行」（舊 bug：line 158 Invalid or unexpected token）',
+    !lines.some((l, i) => /^\'\)/.test(l.trim()) || /join\('$/.test(l)),
+    lines.map((l, i) => `${i + 1}:${l}`).filter(([, l]) => /join\('$/.test(l)).join('|'));
+  ok("links.join('\\n') 保留做跳行字串（唔係真換行）", code.includes("links.join('\\n')"));
+  ok('有定義 SHEET_TABS（舊版本用到但未定義）', /var SHEET_TABS = \[/.test(code));
+  ok('有 doPost / doGet / syncAll', ['function doPost', 'function doGet', 'function syncAll'].every(f => code.includes(f)));
+  ok('支援 action: ping / sync / claim / noticeSignup / loan',
+    ['ping', 'sync', 'claim', 'noticeSignup', 'loan'].every(a => code.includes(`'${a}'`)));
+  ok('有物資借用分頁寫入（appendLoan）', code.includes('function appendLoan') && code.includes("'物資借用'"));
+  ok('報名分頁有「出席與否」欄', code.includes("'出席與否'") && code.includes('function attendOf'));
+  ok('部署步驟說明有內容', gasGuide().split('\n').length >= 5);
+}
+
+/* ---------- 2. 用戶（領袖／執委／團員）可以編輯 ---------- */
+section('用戶名冊（可編輯 · 身份）');
+{
+  await auth.login('leader', 'leader', '8202');
+  window.location.hash = '#/members';
+  window.dispatchEvent(new window.HashChangeEvent('hashchange'));
+  await new Promise(r => setTimeout(r, 40));
+  const view = doc.getElementById('view');
+  ok('名冊頁標題係「用戶」', /用戶/.test(view.textContent), view.textContent.slice(0, 60));
+  ok('每一行有「編輯」掣（以前撳唔到）', view.querySelectorAll('[data-edit]').length >= 1,
+    String(view.querySelectorAll('[data-edit]').length));
+  ok('有身份篩選（領袖／執委／團員）', view.querySelectorAll('[data-ident]').length === 4);
+
+  const firstId = store.load().members[0].id;
+  view.querySelector('[data-edit]').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  await new Promise(r => setTimeout(r, 50));
+  ok('撳「編輯」會去編輯頁（#/members/edit/<id>）',
+    window.location.hash === '#/members/edit/' + firstId, window.location.hash);
+  ok('編輯頁有身份下拉（領袖／執委／團員）', !!doc.querySelector('#f-identity'));
+  ok('身份選項係 領袖／執委／團員',
+    Array.from(doc.querySelectorAll('#f-identity option')).map(o => o.value).join(',') === 'leader,exco,member',
+    Array.from(doc.querySelectorAll('#f-identity option')).map(o => o.value).join(','));
+
+  doc.querySelector('#f-name').value = '測試用戶甲';
+  doc.querySelector('#f-name').dispatchEvent(new window.Event('input', { bubbles: true }));
+  doc.querySelector('#f-identity').value = 'exco';
+  doc.querySelector('#f-identity').dispatchEvent(new window.Event('change', { bubbles: true }));
+  doc.querySelector('[data-act="save"]').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  await new Promise(r => setTimeout(r, 80));
+  const m = store.load().members.find(x => x.id === firstId);
+  ok('改資料可以儲存（以前儲存唔到）', m.name === '測試用戶甲', m.name);
+  ok('身份可以改成「執委」', m.identity === 'exco', m.identity);
+  ok('編輯完會返去個人頁', window.location.hash === '#/members/' + firstId, window.location.hash);
+
+  // 舊資料升級：冇 identity 欄 → 自動推算
+  const migrated = store.migrateIdentities({ members: [
+    { id: 'x1', name: '甲', role: '團長' }, { id: 'x2', name: '乙', role: '司庫' }, { id: 'x3', name: '丙', role: '' }
+  ] });
+  ok('舊資料自動推算身份（團長→領袖 / 司庫→執委 / 其他→團員）',
+    migrated === true, String(migrated));
+  const g = store.load();
+  ok('每個用戶都有身份欄', g.members.every(x => ['leader', 'exco', 'member'].includes(x.identity)),
+    JSON.stringify(g.members.filter(x => !x.identity).map(x => x.name)));
+  ok('執委都有權改用戶資料（以前只有領袖）',
+    (await (async () => { await auth.login('exco', 'exco', '8203'); return auth.can('member.edit'); })()) === true);
+  await auth.login('leader', 'leader', '8202');
+}
+
+/* ---------- 3. 防呆（先存瀏覽器，唔即時寫入） ---------- */
+section('防呆（暫存 → 確認 → 可還原）');
+{
+  const guard = await import('../assets/js/lib/guard.js');
+  guard.dropAllDrafts();
+  guard.saveDraft('member', 'm_test', { name: '暫存測試' });
+  ok('草稿可以暫存去瀏覽器', guard.readDraft('member', 'm_test')?.data?.name === '暫存測試');
+  ok('草稿存喺 localStorage（唔係資料庫）',
+    !!window.localStorage.getItem('venture82.drafts.v2')
+    && !store.load().members.some(m => m.name === '暫存測試'));
+  ok('可以列出所有暫存', guard.listDrafts().some(d => d.section === 'member'));
+  guard.clearDraft('member', 'm_test');
+  ok('儲存後可以清走暫存', guard.readDraft('member', 'm_test') === null);
+
+  // 編輯器輸入 → 自動暫存（未撳儲存唔會入資料庫）
+  window.location.hash = '#/members/new';
+  window.dispatchEvent(new window.HashChangeEvent('hashchange'));
+  await new Promise(r => setTimeout(r, 60));
+  const nameBox = doc.querySelector('#f-name');
+  ok('新增用戶頁有暫存提示位', !!doc.querySelector('[data-draft-stamp]'));
+  nameBox.value = '未儲存用戶';
+  nameBox.dispatchEvent(new window.Event('input', { bubbles: true }));
+  await new Promise(r => setTimeout(r, 900));
+  ok('輸入後自動暫存去瀏覽器', guard.readDraft('member', 'new')?.data?.name === '未儲存用戶',
+    JSON.stringify(guard.readDraft('member', 'new')));
+  ok('未撳「儲存」之前唔會寫入資料庫', !store.load().members.some(m => m.name === '未儲存用戶'));
+  guard.dropAllDrafts();
+
+  // 刪除要打字確認
+  window.location.hash = '#/members/' + firstId2();
+  function firstId2() { return store.load().members[1].id; }
+  window.dispatchEvent(new window.HashChangeEvent('hashchange'));
+  await new Promise(r => setTimeout(r, 50));
+  const target = store.load().members[1];
+  doc.querySelector('[data-act="del"]')?.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  await new Promise(r => setTimeout(r, 80));
+  const dlg = doc.querySelector('.overlay .modal');
+  ok('刪除會彈確認框', !!dlg);
+  const okBtn = dlg?.querySelector('.modal-foot [data-act="1"]');
+  ok('未打字之前「確定刪除」係停用（防手誤）', okBtn?.disabled === true);
+  const ti = dlg?.querySelector('#gd-text');
+  if (ti) { ti.value = target.name; ti.dispatchEvent(new window.Event('input', { bubbles: true })); }
+  await new Promise(r => setTimeout(r, 30));
+  ok('打低個名之後先可以確定', okBtn?.disabled === false);
+  dlg?.querySelector('[data-close-x]')?.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  await new Promise(r => setTimeout(r, 30));
+  ok('取消之後用戶仍然存在', !!store.load().members.find(m => m.id === target.id));
+
+  // 總表同步唔會即時寫入（只排隊）
+  const dbx = store.load();
+  dbx.sync = { ...(dbx.sync || {}), auto: true, pending: 0 };
+  store.commit();
+  ok('開咗「排隊」之後，改動只係累加待同步數（唔會自動送出）',
+    Number(store.load().sync.pending) >= 1, String(store.load().sync?.pending));
+  dbx.sync.auto = false; dbx.sync.pending = 0; store.commit();
+}
+
+/* ---------- 4. 通告：詳情頁 + 輸出（連回覆出席與否） ---------- */
+section('通告詳情（輸出連出席回覆）');
+{
+  const nv = await import('../assets/js/views/notices.js');
+  const n0 = store.add('notices', {
+    id: 'nt-test-attend', type: 'event', status: 'published', publishAt: '2026-09-15',
+    title: { zh: '測試通告（出席）', en: 'Test' }, body: { zh: '內容' },
+    needSignup: true, deadline: '2026-09-30', eventDate: '2026-10-17',
+    fields: [
+      { key: 'name', label: '姓名', type: 'text', required: true },
+      { key: 'contact', label: '聯絡電話', type: 'tel', required: false },
+      { key: 'attend', label: '出席與否', type: 'radio', options: ['出席', '唔出席（請假）'] }
+    ],
+    signups: []
+  });
+  const ms2 = store.load().members.filter(m => m.status !== 'alumni');
+  ok('出席判斷：出席', nv.attendValue({ values: { attend: '出席' } }) === 'yes');
+  ok('出席判斷：唔出席（請假）', nv.attendValue({ values: { attend: '唔出席（請假）' } }) === 'no');
+  ok('出席判斷：未填 = 未回覆', nv.attendValue({ values: {} }) === '');
+
+  nv.markAttendance(store.find('notices', n0.id), ms2[0], 'yes');
+  nv.markAttendance(store.find('notices', n0.id), ms2[1], 'no');
+  const A = nv.attendanceSummary(store.find('notices', n0.id));
+  ok('統計出席 1 位', A.yes === 1, JSON.stringify(A));
+  ok('統計唔出席 1 位', A.no === 1, JSON.stringify(A));
+  ok('其餘計做未回覆', A.none === A.rosterCount - 2, JSON.stringify(A));
+  const rows = nv.attendanceRows(store.find('notices', n0.id));
+  ok('出席表以名冊為本（每位非舊團員一行）', rows.roster.length === ms2.length, `${rows.roster.length}/${ms2.length}`);
+
+  window.location.hash = '#/notices/nt-test-attend';
+  window.dispatchEvent(new window.HashChangeEvent('hashchange'));
+  await new Promise(r => setTimeout(r, 60));
+  const v2 = doc.getElementById('view');
+  ok('通告詳情有文件式排版（同團章一樣）', !!v2.querySelector('#noticeSheet'));
+  ok('右面有「輸出同分享」面板', /輸出同分享/.test(v2.textContent));
+  ok('有「通告＋出席回覆（Word）」輸出掣', !!v2.querySelector('[data-act="export-full-word"]'));
+  ok('有「通告＋出席回覆（PDF）」輸出掣', !!v2.querySelector('[data-act="export-full-pdf"]'));
+  ok('有「出席回覆表（CSV）」輸出掣', !!v2.querySelector('[data-act="export-attend"]'));
+  ok('詳情頁列出每位用戶嘅回覆', v2.querySelectorAll('[data-attend]').length >= 2,
+    String(v2.querySelectorAll('[data-attend]').length));
+  ok('舊通告可以補「出席與否」欄', (() => {
+    const bare = store.add('notices', { id: 'nt-bare', status: 'published', title: { zh: '舊通告' }, needSignup: true, fields: [{ key: 'name', label: '姓名', type: 'text' }], signups: [] });
+    const up = nv.ensureAttendField(store.find('notices', bare.id));
+    return (up.fields || []).some(f => f.key === 'attend');
+  })());
+  store.remove('notices', 'nt-test-attend');
+  store.remove('notices', 'nt-bare');
+}
+
+/* ---------- 5. 旅團選擇閘 ---------- */
+section('旅團選擇閘（先揀旅團再登入）');
+{
+  ok('網址有 ?u= 時直接入登入畫面（唔會見到旅團閘）',
+    !/揀你嘅旅團/.test(doc.body.textContent));
+  ok('index.html 有載入 main.js（旅團閘喺 main.js）',
+    fs.readFileSync(path.join(ROOT, 'index.html'), 'utf8').includes('assets/js/main.js'));
+  const mainSrc = fs.readFileSync(path.join(ROOT, 'assets/js/main.js'), 'utf8');
+  ok('main.js 先顯示旅團閘，之後先 init + 登入',
+    /if \(!unitChosen\(\)\) return renderUnitGate\(\);/.test(mainSrc)
+    && mainSrc.indexOf('renderUnitGate();') < mainSrc.indexOf('await init();'));
+  ok('旅團閘有 MOCK 選項', /data-pick="MOCK"/.test(mainSrc));
+  ok('登入頁有「更換旅團」掣', /btnGate/.test(mainSrc));
+}
+
+/* ---------- 6. 成員連結（申報 / 物資 / 通告報名） ---------- */
+section('成員連結（免登入公開頁）');
+{
+  const links = model.memberLinks();
+  const ids = links.map(l => l.id);
+  ok('有收支申報連結（entry.html）', ids.includes('entry'));
+  ok('有物資借用連結（borrow.html）', ids.includes('borrow'));
+  ok('有團章連結（constitution.html）', ids.includes('constitution'));
+  ok('每條連結都帶旅團編號', links.every(l => /u=(0082|MOCK)/.test(l.url)), links.map(l => l.url).join(' | '));
+  ok('borrow.html 存在', fs.existsSync(path.join(ROOT, 'borrow.html')));
+  ok('public-borrow.js 存在', fs.existsSync(path.join(ROOT, 'assets/js/public-borrow.js')));
+
+  window.location.hash = '#/links';
+  window.dispatchEvent(new window.HashChangeEvent('hashchange'));
+  await new Promise(r => setTimeout(r, 60));
+  const v3 = doc.getElementById('view');
+  ok('「成員連結」頁可以渲染', (v3.innerHTML || '').length > 400, String((v3.innerHTML || '').length));
+  ok('頁上有 QR 掣', v3.querySelectorAll('[data-qr]').length >= 3, String(v3.querySelectorAll('[data-qr]').length));
+  ok('頁上有列印海報掣', v3.querySelectorAll('[data-poster]').length >= 3);
+  ok('側邊欄有「成員連結」', /成員連結/.test(doc.querySelector('.sidebar')?.textContent || ''));
+  if (MODE === 'real') {
+    ok('物資借用送出網址已設定（borrow.html → 總表）',
+      /\/exec$/.test(store.load().settings?.publicBorrow?.submitUrl || ''),
+      store.load().settings?.publicBorrow?.submitUrl);
+  }
+}
+
+/* ---------- 7. 進度追蹤就緒檢查 ---------- */
+section('進度追蹤（連通檢查）');
+{
+  const pv = await import('../assets/js/views/progress.js');
+  const R = pv.readiness();
+  ok('就緒清單有 10 項', R.total === 10, String(R.total));
+  /* 對方（VSBADGE）index.html 嘅實際判斷：
+       if (from==='portal' && ymis && role) → 免登入進入
+     所以 u + from=portal + role + ymis 四樣缺一不可；少一樣就會跌返登入頁。 */
+  ok('Portal 連結有 from=portal（免密碼）', R.url.includes('from=portal'), R.url);
+  ok('Portal 連結帶 ymis（對方必要欄位）', /[?&]ymis=[^&]+/.test(R.url), R.url);
+  /* 自動身份：旅團接入零設定，唔使先去進度系統開帳戶再返嚟填 */
+  ok('portal.ymis 留空會自動產生 PORTAL-<旅團>-<角色>',
+    pv.portalIdentity({ portal: { unitParam: '0082', role: 'exec_committee', ymis: '' } }).ymis === 'PORTAL-0082-EXCO'
+    && pv.portalIdentity({ portal: { unitParam: '0082', role: 'exec_committee', ymis: '' } }).auto === true,
+    JSON.stringify(pv.portalIdentity({ portal: { unitParam: '0082', role: 'exec_committee', ymis: '' } })));
+  ok('自動身份跟角色變（領袖唔會撞執委）',
+    pv.portalIdentity({ portal: { unitParam: '0082', role: 'branch_leader', ymis: '' } }).ymis === 'PORTAL-0082-LEADER'
+    && pv.portalIdentity({ portal: { unitParam: '0082', role: 'group_leader', ymis: '' } }).ymis === 'PORTAL-0082-GLEADER');
+  ok('自己填咗專用身份就以佢為準',
+    pv.portalIdentity({ portal: { unitParam: '0082', role: 'exec_committee', ymis: 'EXCO-82' } }).ymis === 'EXCO-82'
+    && pv.portalIdentity({ portal: { unitParam: '0082', role: 'exec_committee', ymis: 'EXCO-82' } }).auto === false);
+  ok('連結帶 src（主系統 origin）同 ts，供對方日後驗證',
+    /[?&]src=/.test(R.url) && /[?&]ts=\d+/.test(R.url), R.url);
+  ok('零設定（ymis 留空）都係 10/10 就緒',
+    (() => { const c = pv.portalIdentity({ portal: { unitParam: '0082', role: 'exec_committee', ymis: '' } });
+      return !!c.ymis; })(), '');
+  ok('Portal 連結帶 u（旅團編號）', /[?&]u=[^&]+/.test(R.url), R.url);
+  ok('Portal 連結帶 role', /[?&]role=[^&]+/.test(R.url), R.url);
+  ok('網址係對方前端而唔係 GAS /exec（實測：/exec 只回 JSON 錯誤頁）',
+    !/\/macros\/s\//.test(store.load().profile?.progress?.url || ''),
+    store.load().profile?.progress?.url);
+  ok('揀嘅角色對方認得而且有勾選權', pv.TICK_ROLES.includes(R.mode === 'portal' ? (R.url.match(/role=([^&]+)/) || [])[1] : ''),
+    R.url);
+  if (MODE === 'real') {
+    ok('真實旅團已預備好連通進度系統', R.ready === true,
+      R.checks.filter(c => !c.ok).map(c => c.label).join(' / '));
+    ok('Portal 模式帶 u=0082 同 role=exec_committee',
+      R.url.includes('u=0082') && R.url.includes('role=exec_committee'), R.url);
+  } else {
+    ok('示範模式都有自己嘅進度系統設定（示範用）', R.ready === true,
+      R.checks.filter(c => !c.ok).map(c => c.label).join(' / '));
+    ok('示範模式帶 u=MOCK（唔會用真實旅團編號）', R.url.includes('u=MOCK'), R.url);
+    ok('示範模式嘅後端唔會送出街（只有進度連結）', !store.load().backend);
+  }
+  window.location.hash = '#/progress';
+  window.dispatchEvent(new window.HashChangeEvent('hashchange'));
+  await new Promise(r => setTimeout(r, 60));
+  const v4 = doc.getElementById('view');
+  ok('進度頁有就緒清單', /連通進度追蹤/.test(v4.textContent));
+  ok('進度頁有「檢查連線（實測）」掣', !!v4.querySelector('[data-act="check"]'));
+  ok('checkConnection 係一支可以用嘅函式', typeof pv.checkConnection === 'function');
+}
+
+/* ---------- 8. 首頁帳目：現在結餘（含期初） ---------- */
+section('首頁帳目（現在結餘 · 期初結餘）');
+{
+  const db3 = store.load();
+  const keepOpen = db3.settings.openingBalance;
+  const keepOb = db3.settings.openingBalances ? JSON.parse(JSON.stringify(db3.settings.openingBalances)) : undefined;
+  const keepTx = JSON.parse(JSON.stringify(db3.transactions));
+  db3.settings.openingBalance = 8803.28;
+  db3.transactions = [
+    { id: 'tx1', date: '2026-09-01', type: 'income', amount: 1000, item: '團費' },
+    { id: 'tx2', date: '2026-09-02', type: 'expense', amount: 2500, item: '露營' }
+  ];
+  store.commit();
+  ok('現在結餘 = 期初 + 收入 − 支出',
+    Math.round(model.currentBalance() * 100) / 100 === 7303.28, String(model.currentBalance()));
+  ok('唔會再淨係顯示收入減支出（舊做法會出現 −1500）',
+    model.balance(db3.transactions) === -1500 && model.currentBalance() > 0,
+    `balance=${model.balance(db3.transactions)} current=${model.currentBalance()}`);
+  const bd = model.balanceBreakdown();
+  ok('結餘拆解有期初／收入／支出／現在',
+    bd.opening === 8803.28 && bd.income === 1000 && bd.expense === 2500 && Math.round(bd.now * 100) / 100 === 7303.28,
+    JSON.stringify(bd));
+
+  window.location.hash = '#/dashboard';
+  window.dispatchEvent(new window.HashChangeEvent('hashchange'));
+  await new Promise(r => setTimeout(r, 60));
+  const dash = doc.getElementById('view');
+  ok('儀表板顯示「現在結餘」', /現在結餘/.test(dash.textContent));
+  ok('儀表板有帳目流程卡（期初＋收入−支出＝現在）', !!dash.querySelector('.bal-flow'));
+  ok('儀表板顯示期初結餘數字', dash.textContent.includes('8,803.28') || dash.textContent.includes('8803.28'),
+    dash.textContent.replace(/\s+/g, ' ').slice(0, 200));
+  ok('儀表板唔會顯示負數結餘', !/HK\$\s?-/.test(dash.querySelector('.bal-cell.now')?.textContent || ''),
+    dash.querySelector('.bal-cell.now')?.textContent);
+
+  /* 真實情況：舊帳屬於**上年度** → 本年度期初應該係上年度期末 */
+  db3.settings.openingBalances = { '2025-26': 8803.28, '2026-27': 7846.64 };
+  db3.settings.openingBalance = 0;
+  db3.transactions = [
+    { id: 'tx3', date: '2025-06-14', type: 'income', amount: 8630, item: '舊帳收入' },
+    { id: 'tx4', date: '2026-01-05', type: 'expense', amount: 9586.64, item: '舊帳支出' }
+  ];
+  store.commit();
+  window.location.hash = '#/dashboard';
+  window.dispatchEvent(new window.HashChangeEvent('hashchange'));
+  await new Promise(r => setTimeout(r, 80));
+  const dash2 = doc.getElementById('view');
+  const dtxt = dash2.textContent.replace(/\s+/g, ' ');
+  const bd2 = model.balanceBreakdown();
+  ok('上年度帳目唔會計入本年度收入／支出',
+    bd2.income === 0 && bd2.expense === 0, `income=${bd2.income} expense=${bd2.expense}`);
+  ok('上年度期末 = 8,803.28 + 8,630 − 9,586.64 = 7,846.64',
+    Math.round(bd2.prevClosing * 100) / 100 === 7846.64, String(bd2.prevClosing));
+  ok('本年度（2026-27）期初 = 上年度期末 7,846.64，唔係 8,803.28',
+    Math.round(model.currentBalance() * 100) / 100 === 7846.64, String(model.currentBalance()));
+  ok('儀表板寫明係邊個年度（帳目（現在）· 2026-27 年度）',
+    /帳目（現在）·\s*2026-27 年度/.test(dtxt), dtxt.slice(0, 120));
+  ok('儀表板期初格顯示 7,846.64（唔係 8,803.28）',
+    (dash2.querySelector('.bal-flow .bal-cell .bal-v')?.textContent || '').includes('7,846.64'),
+    dash2.querySelector('.bal-flow .bal-cell .bal-v')?.textContent);
+  ok('儀表板有上年度對數行（期初 8,803.28 → 期末 7,846.64）',
+    /上年度 2025-26：期初/.test(dtxt) && dtxt.includes('8,803.28') && dtxt.includes('7,846.64'),
+    dtxt.slice(0, 260));
+  ok('上年度期末同本年度期初吻合時唔會出警告',
+    !/唔吻合/.test(dtxt));
+  ok('逐年期初結餘有捷徑去年度設定',
+    !!dash2.querySelector('[data-go="#/finance/settings"]'));
+
+  // 負數時要有解釋
+  delete db3.settings.openingBalances;
+  db3.settings.openingBalance = 0;
+  store.commit();
+  window.dispatchEvent(new window.HashChangeEvent('hashchange'));
+  await new Promise(r => setTimeout(r, 60));
+  ok('結餘係負數時會解釋原因（期初未填）',
+    /點解會見到負數/.test(doc.getElementById('view').textContent));
+  ok('負數提示有「改期初結餘」捷徑',
+    !!doc.querySelector('[data-go="#/finance/settings"]'));
+
+  db3.settings.openingBalance = keepOpen;
+  db3.settings.openingBalances = keepOb;
+  db3.transactions = keepTx;
+  store.commit();
+
+  window.location.hash = '#/finance/settings';
+  window.dispatchEvent(new window.HashChangeEvent('hashchange'));
+  await new Promise(r => setTimeout(r, 60));
+  const fv = doc.getElementById('view');
+  ok('財務有「年度設定」分頁（改期初結餘）', !!fv.querySelector('#set-open-legacy'));
+  ok('年度設定頁顯示結餘點計', /現在結餘/.test(fv.textContent));
+  /* 期初結餘要逐年，唔可以係一個全域數字 */
+  ok('期初結餘係逐年欄位（唔再係單一全域數字）',
+    fv.querySelectorAll('[data-open-year]').length >= 2,
+    String(fv.querySelectorAll('[data-open-year]').length));
+  ok(`期初欄位包含本年度（${model.currentFY()}）`,
+    !!fv.querySelector(`[data-open-year="${model.currentFY()}"]`));
+  ok('年度設定有「由上年度期末結轉」掣', !!fv.querySelector('[data-act="carry-all"]'));
+  if (MODE === 'real') {
+    ok('年度設定有「用舊帳嘅數字填返」掣', !!fv.querySelector('[data-act="use-ref-opening"]'));
+    fv.querySelector('[data-act="use-ref-opening"]')
+      .dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+    const curEl = fv.querySelector(`[data-open-year="${model.currentFY()}"]`);
+    ok(`舊帳一鍵填數：本年度（${model.currentFY()}）填 7,846.64，唔係 8,803.28`,
+      Number(curEl.value) === 7846.64, String(curEl.value));
+    ok('舊帳一鍵填數：2025-26 填 8,803.28（原表上年度結餘）',
+      Number(fv.querySelector('[data-open-year="2025-26"]').value) === 8803.28,
+      String(fv.querySelector('[data-open-year="2025-26"]').value));
+  }
+}
+
+/* ---------- 期初結餘遷移（舊嘅全域數字 → 逐年） ---------- */
+console.log('\n▌期初結餘遷移（8,803.28 係 2025-26 嘅期初，唔係 2026-27）');
+{
+  const mk = (legacy, extraSettings = {}) => ({
+    settings: { openingBalance: legacy, scoutFYStartMonth: 4, ...extraSettings },
+    reference: {
+      openingBalance: 8803.28, check: { income: 8630, expense: 9586.64, opening: 8803.28, closing: 7846.64 },
+      transactions: [
+        { date: '2025-06-14', type: 'income', amount: 100 },
+        { date: '2026-01-05', type: 'expense', amount: 50 }
+      ]
+    }
+  });
+
+  const a = mk(8803.28);
+  ok('舊全域期初（＝舊帳上年度結餘）會自動搬去對應年度', store.migrateOpeningBalances(a) === true);
+  ok('遷移後 2025-26 期初 = 8,803.28',
+    Number(a.settings.openingBalances?.['2025-26']) === 8803.28, JSON.stringify(a.settings.openingBalances));
+  ok('遷移後 2026-27 期初 = 7,846.64（＝上年度期末）',
+    Number(a.settings.openingBalances?.['2026-27']) === 7846.64, JSON.stringify(a.settings.openingBalances));
+  ok('遷移後全域欄位還原做 0（佢只係「第一筆帳目之前」嘅底數）',
+    Number(a.settings.openingBalance) === 0, String(a.settings.openingBalance));
+  ok('遷移有留紀錄（幾時搬咗邊個年度）',
+    a.settings.openingMigratedFrom?.year === '2025-26' && a.settings.openingMigratedFrom?.nextYear === '2026-27',
+    JSON.stringify(a.settings.openingMigratedFrom));
+
+  const b = mk(8803.28, { openingBalances: { '2026-27': 7846.64 } });
+  ok('已經逐年設定過就唔會再搬（唔會蓋過人手輸入）', store.migrateOpeningBalances(b) === false);
+  ok('已經逐年設定過：內容原封不動', Number(b.settings.openingBalances['2026-27']) === 7846.64
+    && b.settings.openingBalances['2025-26'] === undefined, JSON.stringify(b.settings.openingBalances));
+  ok('全域數字同舊帳唔同就唔會亂搬', store.migrateOpeningBalances(mk(5000)) === false);
+  ok('全域係 0 就唔使搬', store.migrateOpeningBalances(mk(0)) === false);
+}
+
+/* ---------- 跨系統身份 key（federation L1） ---------- */
+console.log('\n▌跨系統身份 key（進度追蹤係獨立系統，要靠 key 對人）');
+{
+  const db4 = store.load();
+  const ms = db4.members;
+  ok('所有用戶都有 systemId（自動產生）',
+    ms.every(m => !!m.systemId), `缺 ${ms.filter(m => !m.systemId).length} 個`);
+  ok('systemId 全部唔重複',
+    new Set(ms.map(m => m.systemId)).size === ms.length, String(new Set(ms.map(m => m.systemId)).size));
+  ok('所有用戶都有 ymis 欄（未填都要有呢個欄）',
+    ms.every(m => 'ymis' in m), String(ms.filter(m => !('ymis' in m)).length));
+
+  const first = ms[0];
+  const before = first.systemId;
+  store.migrateMemberKeys(db4);
+  ok('migrateMemberKeys 唔會改已有 systemId（key 必須穩定）', first.systemId === before, first.systemId);
+  ok('migrateMemberKeys 第二次跑係 no-op', store.migrateMemberKeys(db4) === false);
+  /* systemId 必須係確定性：另一部裝置獨立跑遷移都要得到同一個 key，
+     否則呢個 key 永遠對唔上，做唔到跨系統配對 */
+  const clone = JSON.parse(JSON.stringify({ unitCode: db4.unitCode, members: ms.map(m => ({ id: m.id })) }));
+  store.migrateMemberKeys(clone);
+  ok('systemId 係確定性（唔同裝置都推斷到同一個）',
+    clone.members.every((m, i) => m.systemId === ms[i].systemId),
+    `${clone.members[0].systemId} vs ${ms[0].systemId}`);
+  ok('systemId 格式 = 旅團編號-用戶 id',
+    ms.every(m => m.systemId === `${db4.unitCode}-${m.id}`), ms[0].systemId);
+
+  const kc0 = model.keyCoverage(ms);
+  ok('keyCoverage 統計到 YMIS 覆蓋率',
+    kc0.total === ms.length && kc0.withSystemId === ms.length, JSON.stringify(kc0));
+  ok('冇 YMIS 時 memberKey fallback 去 systemId',
+    model.memberKey({ systemId: 'abc' }).kind === 'systemId' && model.memberKey({ systemId: 'abc' }).key === 'abc');
+  ok('有 YMIS 時 memberKey 優先用 YMIS',
+    model.memberKey({ ymis: 'Y123', systemId: 'abc' }).kind === 'ymis');
+  ok('乜都冇 → key 係空', model.memberKey({}).key === '');
+  /* 對方規則：成員用 YMIS，領袖用 Email（佢登入頁寫住） */
+  ok('領袖優先用 Email 做 key（領袖本來就冇 YMIS）',
+    model.memberKey({ identity: 'leader', email: 'L@x.hk', ymis: '' }).kind === 'email');
+  ok('團員優先用 YMIS 做 key',
+    model.memberKey({ identity: 'member', email: 'a@x.hk', ymis: '2019259338' }).kind === 'ymis');
+  ok('expectedKeyKind：領袖→email，執委／團員→ymis',
+    model.expectedKeyKind({ identity: 'leader' }) === 'email'
+    && model.expectedKeyKind({ identity: 'exco' }) === 'ymis'
+    && model.expectedKeyKind({ identity: 'member' }) === 'ymis');
+  {
+    const kcL = model.keyCoverage([
+      { id: 'a', name: '領袖A', identity: 'leader', email: 'a@x.hk', systemId: 's1' },
+      { id: 'b', name: '團員B', identity: 'member', ymis: '2019259338', systemId: 's2' }
+    ]);
+    ok('領袖有 Email + 團員有 YMIS → 100% 對得上（唔會誤報領袖缺 YMIS）',
+      kcL.percent === 100 && kcL.unmatched === 0 && kcL.ready === true, JSON.stringify(kcL));
+    const kcM = model.keyCoverage([
+      { id: 'c', name: '領袖C', identity: 'leader', email: '', systemId: 's3' },
+      { id: 'd', name: '團員D', identity: 'member', ymis: '', systemId: 's4' }
+    ]);
+    ok('領袖冇 Email + 團員冇 YMIS → 列出要補乜',
+      kcM.unmatched === 2 && kcM.unmatchedList[0].need === 'email' && kcM.unmatchedList[1].need === 'ymis',
+      JSON.stringify(kcM.unmatchedList));
+    ok('systemId 唔算「對方認得到」（只係本系統 fallback）',
+      kcM.withSystemId === 2 && kcM.matched === 0, JSON.stringify(kcM));
+  }
+  ok('findByKey 可以用 Email 搵人（領袖）',
+    (() => { const m0 = store.load().members.find(x => String(x.email || '').trim());
+      return m0 ? model.findByKey(m0.email)?.id === m0.id : true; })());
+
+  const keepY = first.ymis;
+  const ymisBase = model.keyCoverage(store.load().members).withYmis;   // 基準（seed 可能已有真實 YMIS）
+  first.ymis = 'TEST-YMIS-1';
+  store.commit();
+  ok('findByKey 用 YMIS 搵到人', model.findByKey('TEST-YMIS-1')?.id === first.id);
+  ok('findByKey 用 systemId 搵到人', model.findByKey(first.systemId)?.id === first.id);
+  ok('findByKey 搵唔到會回 null', model.findByKey('NO-SUCH-KEY') === null);
+  ok('YMIS 覆蓋率跟實際填入數一致',
+    model.keyCoverage(store.load().members).withYmis === ymisBase + (keepY ? 0 : 1),
+    `${model.keyCoverage(store.load().members).withYmis} vs base ${ymisBase}`);
+  first.ymis = keepY;
+  store.commit();
+
+  /* UI：用戶編輯頁要有 YMIS 欄 */
+  window.location.hash = '#/members/edit/' + first.id;
+  window.dispatchEvent(new window.HashChangeEvent('hashchange'));
+  await new Promise(r => setTimeout(r, 80));
+  const mv = doc.getElementById('view');
+  ok('用戶編輯頁有「會籍編號（YMIS）」欄', !!mv.querySelector('#f-ymis'));
+  ok('用戶編輯頁顯示系統 ID（唯讀）',
+    /系統 ID/.test(mv.textContent) && !!Array.from(mv.querySelectorAll('input[readonly]')).length);
+
+  window.location.hash = '#/members';
+  window.dispatchEvent(new window.HashChangeEvent('hashchange'));
+  await new Promise(r => setTimeout(r, 80));
+  ok('用戶列表有身份對應覆蓋率提示（按身份分 YMIS／Email）',
+    /可以同進度系統對上/.test(doc.getElementById('view').textContent)
+    && /團員／執委/.test(doc.getElementById('view').textContent)
+    && /領袖/.test(doc.getElementById('view').textContent));
+
+  window.location.hash = '#/progress';
+  window.dispatchEvent(new window.HashChangeEvent('hashchange'));
+  await new Promise(r => setTimeout(r, 80));
+  const pv = doc.getElementById('view').textContent;
+  ok('進度頁講明係聯邦式（進度資料由對面系統擁有）', /聯邦式/.test(pv) && /獨立系統/.test(pv));
+  ok('進度頁顯示身份對應覆蓋率（團員 YMIS／領袖 Email 分開計）',
+    /可以同對方對上/.test(pv) && /團員／執委（要有 YMIS）/.test(pv) && /領袖（要有 Email）/.test(pv));
+  ok('進度頁分得開「連結就緒」同「身份對齊」', /連結狀態/.test(pv) && /資料可對應|身份未對齊/.test(pv));
+  ok('進度頁有去補 YMIS 嘅捷徑', !!doc.querySelector('[data-go="#/members"]'));
+
+  /* 總表要帶住 key，Sheet 先可以做 join */
+  const { gasTemplate } = await import('../assets/js/lib/gastemplate.js');
+  const gsCode = gasTemplate();
+  ok('Code.gs 團員表帶 ymis 欄', /'ymis'/.test(gsCode));
+  ok('Code.gs 團員表帶 systemId 欄', /'systemId'/.test(gsCode));
+}
+
+/* ---------- 新旅團申請接入（#1） ---------- */
+console.log('\n▌新旅團申請接入（送去 ADMIN 收件匣）');
+{
+  const ob = await import('../assets/js/lib/onboard.js');
+  const box = ob.adminInbox();
+  ok('admin 收件匣已設定（data/units.json → admin.submitUrl）', box.configured === true, box.url);
+  ok('收件匣係 Apps Script /exec', /^https:\/\/script\.google\.com\/macros\/s\//.test(box.url), box.url);
+  ok('appType 係 82venture（同 vsbadge 共用收件匣時可以分辨）', ob.APP_TYPE === '82venture');
+
+  const good = ob.validateApplication({
+    troopId: '0100', troopName: '第一百旅深資童軍團',
+    scriptUrl: 'https://script.google.com/macros/s/AKfycbTESTTESTTESTTESTTESTTESTTESTTEST/exec',
+    apiKey: 'K1', contact: 'a@b.hk', note: 'x'
+  });
+  ok('填齊就通過驗證', good.ok === true && good.errors.length === 0, JSON.stringify(good.errors));
+  ok('payload schema 同 VSBADGE submitRegistration 對齊',
+    ['troopId','troopName','scriptUrl','apiKey','appType','note'].every(k => k in good.payload),
+    Object.keys(good.payload).join(','));
+  ok('payload 帶 mainSystemUrl（管理員要用做 portalOrigin）',
+    typeof good.payload.mainSystemUrl === 'string' && good.payload.mainSystemUrl.length > 0,
+    good.payload.mainSystemUrl);
+  ok('payload 帶 at（時間戳）', /^\d{4}-\d{2}-\d{2}T/.test(good.payload.at || ''), good.payload.at);
+
+  const bad = ob.validateApplication({ troopId: '', troopName: '', scriptUrl: 'http://example.com/x' });
+  ok('缺欄位會逐項報錯', bad.ok === false && bad.errors.length >= 3, JSON.stringify(bad.errors));
+  ok('唔係 GAS /exec 嘅後端網址會被擋',
+    bad.errors.some(e => /\/exec/.test(e)), JSON.stringify(bad.errors));
+  ok('旅團編號格式會被驗證',
+    ob.validateApplication({ troopId: '01 00!!', troopName: 'X',
+      scriptUrl: 'https://script.google.com/macros/s/AKfycbTESTTESTTESTTESTTESTTESTTESTTEST/exec' })
+      .errors.some(e => /旅團編號/.test(e)));
+
+  const failed = await ob.submitApplication({ troopId: '', troopName: '', scriptUrl: '' });
+  ok('驗證失敗就唔會送出', failed.ok === false && failed.errors.length > 0, JSON.stringify(failed.errors));
+
+  const cl = ob.adminChecklist('0100');
+  ok('管理員 checklist 有列出兩邊要做嘅嘢',
+    cl.length >= 4 && cl.some(x => x.includes('units.json')) && cl.some(x => x.includes('troops.json')),
+    JSON.stringify(cl));
+  ok('checklist 提埋 portalOrigin / portalRoles',
+    cl.some(x => /portalOrigin/.test(x)), JSON.stringify(cl));
+
 }
 
 /* ---------- 總結 ---------- */
