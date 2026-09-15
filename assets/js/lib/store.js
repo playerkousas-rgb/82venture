@@ -16,6 +16,7 @@ import { todayISO, nowStamp } from './dates.js';
 import {
   registry, unitEntry, backendOf, dataPathOf, fetchUnitData, fetchMockData, defaultUnitCode, localUnits
 } from './units.js';
+import { scoutFYLabel } from './fiscal.js';
 
 export const SCHEMA = 2;
 
@@ -84,6 +85,39 @@ export function migrateIdentities(db) {
     changed = true;
   });
   return changed;
+}
+
+/**
+ * 期初結餘遷移：舊版本得一個**全域** settings.openingBalance，
+ * 但期初結餘其實係**逐年**嘅 —— 8,803.28 係 2025-26 嘅期初，
+ * 唔係 2026-27 嘅期初（2026-27 嘅期初應該係 2025-26 嘅期末 7,846.64）。
+ *
+ * 如果舊嘅全域數字啱好等於舊帳參考嘅「上年度結餘」，即係用錯咗年度，
+ * 呢度會搬返佢去對應年度，並把期末結轉去下一個年度。
+ * @returns {boolean} 有冇改動
+ */
+export function migrateOpeningBalances(db) {
+  if (!db || !db.settings) return false;
+  const s = db.settings;
+  const legacy = Number(s.openingBalance || 0);
+  if (!legacy) return false;
+  if (s.openingBalances && Object.keys(s.openingBalances).length) return false;  // 已經逐年設定過
+  const ref = db.reference || {};
+  const refOpen = Number(ref.openingBalance || 0);
+  if (!refOpen || Math.abs(refOpen - legacy) > 0.005) return false;               // 唔係同一個數 → 唔亂搬
+  const dates = (ref.transactions || []).map(t => String(t.date || '').slice(0, 10)).filter(Boolean).sort();
+  if (!dates.length) return false;
+  const startMonth = Number(s.scoutFYStartMonth || 4);
+  const year = scoutFYLabel(dates[dates.length - 1], startMonth);                 // 由帳目日期推年度
+  const y = Number(year.split('-')[0]) + 1;
+  const nextYear = `${y}-${String(y + 1).slice(-2)}`;
+  const inc = (ref.transactions || []).filter(t => t.type === 'income').reduce((a, t) => a + Number(t.amount || 0), 0);
+  const exp = (ref.transactions || []).filter(t => t.type === 'expense').reduce((a, t) => a + Number(t.amount || 0), 0);
+  const closing = Math.round((ref.check?.closing ?? (refOpen + inc - exp)) * 100) / 100;
+  s.openingBalances = { [year]: refOpen, [nextYear]: closing };
+  s.openingBalance = 0;                                                            // 全域欄位還原做「第一筆帳目之前嘅底數」
+  s.openingMigratedFrom = { at: nowStamp(), year, nextYear, amount: refOpen, closing };
+  return true;
 }
 
 /* ---------------- 種子資料 ---------------- */
@@ -232,6 +266,8 @@ export async function init(opts = {}) {
   }
   // 用戶名冊升級：舊資料冇「身份」欄 → 由職位／標籤推算（領袖 / 執委 / 團員）
   if (migrateIdentities(state.db)) persist();
+  // 期初結餘：舊嘅全域數字如果係上年度嘅期初，自動搬返去對應年度（見 migrateOpeningBalances）
+  if (migrateOpeningBalances(state.db)) persist();
   // 後端設定升級：舊資料庫（未有 sync 設定）自動補上 Registry / unit.json 嘅 Apps Script 網址
   if (state.mode === 'real') {
     const before = JSON.stringify([state.db.sync?.url || '', state.db.settings?.notice?.submitUrl || '', state.db.settings?.publicEntry?.submitUrl || '', state.db.settings?.publicBorrow?.submitUrl || '']);

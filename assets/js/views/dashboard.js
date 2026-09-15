@@ -71,40 +71,49 @@ export function render() {
   </div>
 
   ${bal.now < 0 ? noteBox(
-    `<b>點解會見到負數？</b> 而家顯示嘅係「期初結餘 ＋ 收入 − 支出」。${
+    `<b>點解會見到負數？</b> 而家顯示嘅係「<b>${esc(bal.year)} 年度</b>期初結餘 ＋ 本年度收入 − 本年度支出」。${
       bal.likelyMissingOpening
-        ? `你仲未填<b>期初結餘</b>（你嘅舊帳顯示上年度結餘係 <b>${money(bal.referenceOpening)}</b>），所以先會變負。`
-        : bal.hasOpening ? '請核對期初結餘同期內帳目。' : '而家期初結餘係 0，如果旅團本身有底數，請先填期初結餘。'
+        ? `你仲未填 <b>${esc(bal.year)} 年度嘅期初結餘</b>（上年度 ${esc(bal.prevYear)} 嘅期末係 <b>${money(bal.prevClosing)}</b>${bal.referenceClosing ? `；你嘅舊帳期末係 <b>${money(bal.referenceClosing)}</b>` : ''}），所以先會變負。`
+        : bal.hasOpening ? '請核對本年度期初結餘同期內帳目。' : `而家 ${esc(bal.year)} 年度期初結餘係 0，如果旅團本身有底數，請先填期初結餘。`
     }<div class="row gap-8 mt-10 wrap">
-      <button class="btn btn-xs btn-primary" data-go="#/finance/import">匯入舊帳（連期初結餘）</button>
-      <button class="btn btn-xs" data-go="#/finance/settings">改期初結餘</button></div>`, 'warn') + '<div class="mb-16"></div>' : ''}
+      <button class="btn btn-xs btn-primary" data-go="#/finance/settings">改 ${esc(bal.year)} 期初結餘</button>
+      <button class="btn btn-xs" data-go="#/finance/import">匯入舊帳（會自動結轉）</button></div>`, 'warn') + '<div class="mb-16"></div>' : ''}
 
   <div class="card mb-16">
     <div class="card-head">
-      <div><div class="card-title">帳目（現在）</div>
-        <div class="card-sub">截至 ${fmtDate(today, 'full')} · ${bal.count} 筆紀錄${months.has(curMonth) ? ' · 本月已有記錄' : ' · 本月未有記錄'}</div></div>
+      <div><div class="card-title">帳目（現在）· ${esc(bal.year)} 年度</div>
+        <div class="card-sub">本年度 ${esc(bal.range.start)} 至 ${esc(bal.range.end)} · 截至 ${fmtDate(today, 'full')} · 本年度 ${bal.count} 筆${months.has(curMonth) ? ' · 本月已有記錄' : ' · 本月未有記錄'}</div></div>
       <button class="btn btn-sm" data-go="#/finance">${icon('wallet', 14)} 去財務</button>
     </div>
     <div style="padding:14px 16px">
       <div class="bal-flow">
-        <div class="bal-cell"><div class="bal-k">期初結餘</div>
+        <div class="bal-cell"><div class="bal-k">${esc(bal.year)} 期初結餘</div>
           <div class="bal-v">${money(bal.opening)}</div>
-          <div class="bal-s">${bal.hasOpening ? esc(bal.openingDate || '') : '<span class="faint">未填（撳入去設定）</span>'}</div></div>
+          <div class="bal-s">${bal.openingExplicit
+            ? '已設定'
+            : bal.prevCount ? `結轉自 ${esc(bal.prevYear)}（${bal.prevCount} 筆）` : '<span class="faint">未填（撳入去設定）</span>'}</div></div>
         <div class="bal-op">＋</div>
-        <div class="bal-cell"><div class="bal-k">累計收入</div>
+        <div class="bal-cell"><div class="bal-k">本年度收入</div>
           <div class="bal-v" style="color:var(--ok)">${money(bal.income)}</div>
-          <div class="bal-s">${tx().filter(t => t.type === 'income').length} 筆</div></div>
+          <div class="bal-s">${list2income(bal)} 筆</div></div>
         <div class="bal-op">−</div>
-        <div class="bal-cell"><div class="bal-k">累計支出</div>
+        <div class="bal-cell"><div class="bal-k">本年度支出</div>
           <div class="bal-v" style="color:var(--danger)">${money(bal.expense)}</div>
-          <div class="bal-s">${tx().filter(t => t.type === 'expense').length} 筆</div></div>
+          <div class="bal-s">${bal.count - list2income(bal)} 筆</div></div>
         <div class="bal-op">＝</div>
         <div class="bal-cell now"><div class="bal-k">現在結餘</div>
           <div class="bal-v" style="color:${bal.now < 0 ? 'var(--danger)' : 'var(--brand-700)'}">${money(bal.now)}</div>
           <div class="bal-s">${bal.now < 0 ? '⚠ 請核對期初結餘' : '可用結餘'}</div></div>
       </div>
-      ${bal.hasUnimportedReference ? `<div class="hint mt-10">你嘅舊帳（${(load().reference?.transactions || []).length} 筆，期初 ${money(bal.referenceOpening)}）仲未入帳 ——
-        <button class="btn btn-xs" data-go="#/finance/import">去匯入</button></div>` : ''}
+      <div class="row-between wrap gap-8 mt-12" style="border-top:1px dashed var(--line-2);padding-top:10px">
+        <div class="xs faint">上年度 ${esc(bal.prevYear)}：期初 ${money(bal.prevOpening)} → <b>期末 ${money(bal.prevClosing)}</b>（${bal.prevCount} 筆）
+          ${bal.openingExplicit && Math.abs(bal.prevClosing - bal.opening) > 0.005
+            ? `<span style="color:var(--warn)"> ⚠ 同本年度期初 ${money(bal.opening)} 唔吻合</span>` : ''}</div>
+        <button class="btn btn-xs" data-go="#/finance/settings">${icon('settings', 13)} 逐年期初結餘</button>
+      </div>
+      ${bal.hasUnimportedReference ? `<div class="hint mt-10">你嘅舊帳（${esc(bal.referenceYear || '')} 分頁，${(load().reference?.transactions || []).length} 筆：期初 ${money(bal.referenceOpening)} → 期末 <b>${money(bal.referenceClosing)}</b>）仲未入帳 ——
+        <button class="btn btn-xs" data-go="#/finance/import">去匯入（會把期末結轉做 ${esc(bal.year)} 期初）</button></div>` : ''}
+      ${bal.openingMismatch ? `<div class="hint mt-8" style="color:var(--warn)">本年度期初（${money(bal.opening)}）同舊帳期末（${money(bal.referenceClosing)}）唔同，請核對。</div>` : ''}
     </div>
   </div>
 
@@ -114,7 +123,8 @@ export function render() {
     ${stat('現在結餘', money(bal.now),
       `期初 ${money(bal.opening)} ＋ 收入 ${money(bal.income)} − 支出 ${money(bal.expense)}`,
       bal.now < 0 ? 'danger' : 'ok')}
-    ${stat(f.unpaidCount ? '未收團費' : '團費已清', f.unpaidCount ? money(f.outstanding) : '全部收齊', `${f.paidCount}/${f.total} 已收（${f.rate}%）`, f.unpaidCount ? 'warn' : 'ok')}
+    ${stat(f.unpaidCount ? '未收團費' : '團費已清', f.unpaidCount ? money(f.outstanding) : '全部收齊',
+      `${esc(settings().feePeriodLabel || '')}${f.paidCount}/${f.total} 已收（${f.rate}%）`, f.unpaidCount ? 'warn' : 'ok')}
   </div>
 
   <div class="grid g-2-1">
@@ -206,6 +216,11 @@ export function render() {
       </div>
     </div>
   </div>`;
+}
+
+function list2income(bal) {
+  const r = bal.range;
+  return tx().filter(t => t.type === 'income' && String(t.date).slice(0, 10) >= r.start && String(t.date).slice(0, 10) <= r.end).length;
 }
 
 function bdayRow(x, custom = '') {

@@ -252,6 +252,7 @@ if (MODE === 'mock') {
   await auth.login('leader', 'leader', '8202');
   const txBefore = store.load().transactions.length;
   const openBefore = store.load().settings.openingBalance;
+  const obBefore = JSON.parse(JSON.stringify(store.load().settings.openingBalances || {}));
   window.location.hash = '#/finance/import';
   window.dispatchEvent(new window.HashChangeEvent('hashchange'));
   await new Promise(r => setTimeout(r, 40));
@@ -269,21 +270,39 @@ if (MODE === 'mock') {
 
     const db = store.load();
     ok('匯入 56 筆帳目', db.transactions.length - txBefore === 56, `+${db.transactions.length - txBefore}`);
-    ok('期初結餘已設為 8,803.28', Number(db.settings.openingBalance) === 8803.28, String(db.settings.openingBalance));
-    const inc = db.transactions.reduce((a, t) => a + (t.type === 'income' ? Number(t.amount) : 0), 0);
-    const exp = db.transactions.reduce((a, t) => a + (t.type === 'expense' ? Number(t.amount) : 0), 0);
-    const bal = Math.round((Number(db.settings.openingBalance) + inc - exp) * 100) / 100;
-    ok('匯入後結餘同原表總結一致（7,846.64）', bal === 7846.64, String(bal));
+
+    /* 期初結餘要**逐年**：8,803.28 係 2025-26 嘅期初，唔係 2026-27 嘅期初 */
+    const ob = db.settings.openingBalances || {};
+    ok('2025-26 期初結餘設為 8,803.28（原表「上年度結餘」）',
+      Number(ob['2025-26']) === 8803.28, JSON.stringify(ob));
+    ok('2026-27 期初結餘自動結轉為 7,846.64（＝2025-26 期末）',
+      Number(ob['2026-27']) === 7846.64, JSON.stringify(ob));
+    ok('唔會把上年度期初當成本年度期初',
+      Number(model.openingOf('2026-27').amount) === 7846.64, String(model.openingOf('2026-27').amount));
+    ok('2025-26 期末＝8,803.28＋8,630−9,586.64＝7,846.64（同原表總結一致）',
+      Math.round((model.openingOf('2025-26').amount
+        + model.sumBy(db.transactions.filter(t => model.inRange(t.date, '2025-04-01', '2026-03-31')), 'income')
+        - model.sumBy(db.transactions.filter(t => model.inRange(t.date, '2025-04-01', '2026-03-31')), 'expense')) * 100) / 100 === 7846.64,
+      String(model.openingOf('2025-26').amount));
+    ok('舊帳 56 筆全部屬於 2025-26（冇一筆跌入 2026-27）',
+      db.transactions.filter(t => t.reference).every(t => model.inRange(t.date, '2025-04-01', '2026-03-31')),
+      String(db.transactions.filter(t => t.reference && !model.inRange(t.date, '2025-04-01', '2026-03-31')).length));
+    ok('而家（2026-27）結餘＝本年度期初 7,846.64（本年度未有帳目）',
+      Math.round(model.currentBalance() * 100) / 100 === 7846.64, String(model.currentBalance()));
+    ok('首頁唔會再顯示負數', model.currentBalance() > 0, String(model.currentBalance()));
     ok('單據連結有保留（7 筆）', db.transactions.filter(t => t.receiptLink).length === 7,
       String(db.transactions.filter(t => t.receiptLink).length));
     ok('匯入時順便標記團費已收', db.fees.filter(f => f.paid && String(f.period).includes('2025')).length >= 3,
       JSON.stringify(db.fees.filter(f => f.paid).map(f => `${f.period}:${f.memberId}`)));
 
     // 還原，唔好污染後面嘅測試
-    db.transactions = db.transactions.filter(t => !t.imported);
+    db.transactions = db.transactions.filter(t => !t.imported && !t.reference);
     db.fees = db.fees.filter(f => !String(f.period || '').startsWith('2025'));
     db.settings.openingBalance = openBefore;
+    db.settings.openingBalances = obBefore;
     store.commit();
+    ok('（已還原匯入，唔影響後面測試）',
+      store.load().transactions.length === txBefore, String(store.load().transactions.length));
   }
 }
 
@@ -1174,6 +1193,7 @@ section('首頁帳目（現在結餘 · 期初結餘）');
 {
   const db3 = store.load();
   const keepOpen = db3.settings.openingBalance;
+  const keepOb = db3.settings.openingBalances ? JSON.parse(JSON.stringify(db3.settings.openingBalances)) : undefined;
   const keepTx = JSON.parse(JSON.stringify(db3.transactions));
   db3.settings.openingBalance = 8803.28;
   db3.transactions = [
@@ -1202,7 +1222,41 @@ section('首頁帳目（現在結餘 · 期初結餘）');
   ok('儀表板唔會顯示負數結餘', !/HK\$\s?-/.test(dash.querySelector('.bal-cell.now')?.textContent || ''),
     dash.querySelector('.bal-cell.now')?.textContent);
 
+  /* 真實情況：舊帳屬於**上年度** → 本年度期初應該係上年度期末 */
+  db3.settings.openingBalances = { '2025-26': 8803.28, '2026-27': 7846.64 };
+  db3.settings.openingBalance = 0;
+  db3.transactions = [
+    { id: 'tx3', date: '2025-06-14', type: 'income', amount: 8630, item: '舊帳收入' },
+    { id: 'tx4', date: '2026-01-05', type: 'expense', amount: 9586.64, item: '舊帳支出' }
+  ];
+  store.commit();
+  window.location.hash = '#/dashboard';
+  window.dispatchEvent(new window.HashChangeEvent('hashchange'));
+  await new Promise(r => setTimeout(r, 80));
+  const dash2 = doc.getElementById('view');
+  const dtxt = dash2.textContent.replace(/\s+/g, ' ');
+  const bd2 = model.balanceBreakdown();
+  ok('上年度帳目唔會計入本年度收入／支出',
+    bd2.income === 0 && bd2.expense === 0, `income=${bd2.income} expense=${bd2.expense}`);
+  ok('上年度期末 = 8,803.28 + 8,630 − 9,586.64 = 7,846.64',
+    Math.round(bd2.prevClosing * 100) / 100 === 7846.64, String(bd2.prevClosing));
+  ok('本年度（2026-27）期初 = 上年度期末 7,846.64，唔係 8,803.28',
+    Math.round(model.currentBalance() * 100) / 100 === 7846.64, String(model.currentBalance()));
+  ok('儀表板寫明係邊個年度（帳目（現在）· 2026-27 年度）',
+    /帳目（現在）·\s*2026-27 年度/.test(dtxt), dtxt.slice(0, 120));
+  ok('儀表板期初格顯示 7,846.64（唔係 8,803.28）',
+    (dash2.querySelector('.bal-flow .bal-cell .bal-v')?.textContent || '').includes('7,846.64'),
+    dash2.querySelector('.bal-flow .bal-cell .bal-v')?.textContent);
+  ok('儀表板有上年度對數行（期初 8,803.28 → 期末 7,846.64）',
+    /上年度 2025-26：期初/.test(dtxt) && dtxt.includes('8,803.28') && dtxt.includes('7,846.64'),
+    dtxt.slice(0, 260));
+  ok('上年度期末同本年度期初吻合時唔會出警告',
+    !/唔吻合/.test(dtxt));
+  ok('逐年期初結餘有捷徑去年度設定',
+    !!dash2.querySelector('[data-go="#/finance/settings"]'));
+
   // 負數時要有解釋
+  delete db3.settings.openingBalances;
   db3.settings.openingBalance = 0;
   store.commit();
   window.dispatchEvent(new window.HashChangeEvent('hashchange'));
@@ -1213,6 +1267,7 @@ section('首頁帳目（現在結餘 · 期初結餘）');
     !!doc.querySelector('[data-go="#/finance/settings"]'));
 
   db3.settings.openingBalance = keepOpen;
+  db3.settings.openingBalances = keepOb;
   db3.transactions = keepTx;
   store.commit();
 
@@ -1220,8 +1275,60 @@ section('首頁帳目（現在結餘 · 期初結餘）');
   window.dispatchEvent(new window.HashChangeEvent('hashchange'));
   await new Promise(r => setTimeout(r, 60));
   const fv = doc.getElementById('view');
-  ok('財務有「年度設定」分頁（改期初結餘）', !!fv.querySelector('#set-open'));
+  ok('財務有「年度設定」分頁（改期初結餘）', !!fv.querySelector('#set-open-legacy'));
   ok('年度設定頁顯示結餘點計', /現在結餘/.test(fv.textContent));
+  /* 期初結餘要逐年，唔可以係一個全域數字 */
+  ok('期初結餘係逐年欄位（唔再係單一全域數字）',
+    fv.querySelectorAll('[data-open-year]').length >= 2,
+    String(fv.querySelectorAll('[data-open-year]').length));
+  ok(`期初欄位包含本年度（${model.currentFY()}）`,
+    !!fv.querySelector(`[data-open-year="${model.currentFY()}"]`));
+  ok('年度設定有「由上年度期末結轉」掣', !!fv.querySelector('[data-act="carry-all"]'));
+  if (MODE === 'real') {
+    ok('年度設定有「用舊帳嘅數字填返」掣', !!fv.querySelector('[data-act="use-ref-opening"]'));
+    fv.querySelector('[data-act="use-ref-opening"]')
+      .dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+    const curEl = fv.querySelector(`[data-open-year="${model.currentFY()}"]`);
+    ok(`舊帳一鍵填數：本年度（${model.currentFY()}）填 7,846.64，唔係 8,803.28`,
+      Number(curEl.value) === 7846.64, String(curEl.value));
+    ok('舊帳一鍵填數：2025-26 填 8,803.28（原表上年度結餘）',
+      Number(fv.querySelector('[data-open-year="2025-26"]').value) === 8803.28,
+      String(fv.querySelector('[data-open-year="2025-26"]').value));
+  }
+}
+
+/* ---------- 期初結餘遷移（舊嘅全域數字 → 逐年） ---------- */
+console.log('\n▌期初結餘遷移（8,803.28 係 2025-26 嘅期初，唔係 2026-27）');
+{
+  const mk = (legacy, extraSettings = {}) => ({
+    settings: { openingBalance: legacy, scoutFYStartMonth: 4, ...extraSettings },
+    reference: {
+      openingBalance: 8803.28, check: { income: 8630, expense: 9586.64, opening: 8803.28, closing: 7846.64 },
+      transactions: [
+        { date: '2025-06-14', type: 'income', amount: 100 },
+        { date: '2026-01-05', type: 'expense', amount: 50 }
+      ]
+    }
+  });
+
+  const a = mk(8803.28);
+  ok('舊全域期初（＝舊帳上年度結餘）會自動搬去對應年度', store.migrateOpeningBalances(a) === true);
+  ok('遷移後 2025-26 期初 = 8,803.28',
+    Number(a.settings.openingBalances?.['2025-26']) === 8803.28, JSON.stringify(a.settings.openingBalances));
+  ok('遷移後 2026-27 期初 = 7,846.64（＝上年度期末）',
+    Number(a.settings.openingBalances?.['2026-27']) === 7846.64, JSON.stringify(a.settings.openingBalances));
+  ok('遷移後全域欄位還原做 0（佢只係「第一筆帳目之前」嘅底數）',
+    Number(a.settings.openingBalance) === 0, String(a.settings.openingBalance));
+  ok('遷移有留紀錄（幾時搬咗邊個年度）',
+    a.settings.openingMigratedFrom?.year === '2025-26' && a.settings.openingMigratedFrom?.nextYear === '2026-27',
+    JSON.stringify(a.settings.openingMigratedFrom));
+
+  const b = mk(8803.28, { openingBalances: { '2026-27': 7846.64 } });
+  ok('已經逐年設定過就唔會再搬（唔會蓋過人手輸入）', store.migrateOpeningBalances(b) === false);
+  ok('已經逐年設定過：內容原封不動', Number(b.settings.openingBalances['2026-27']) === 7846.64
+    && b.settings.openingBalances['2025-26'] === undefined, JSON.stringify(b.settings.openingBalances));
+  ok('全域數字同舊帳唔同就唔會亂搬', store.migrateOpeningBalances(mk(5000)) === false);
+  ok('全域係 0 就唔使搬', store.migrateOpeningBalances(mk(0)) === false);
 }
 
 /* ---------- 總結 ---------- */

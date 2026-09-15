@@ -5,7 +5,7 @@
 
 import { load, collection, find } from './store.js';
 import { todayISO, parseBirthday, daysUntilBirthday, ageFrom, turningAge } from './dates.js';
-import { agmIsDefault, unitFYOf, scoutFYLabel } from './fiscal.js';
+import { agmIsDefault, unitFYOf, scoutFYLabel, scoutFYRange, inRange } from './fiscal.js';
 export * from './fiscal.js';
 
 /* ---------------- 基本 ---------------- */
@@ -209,40 +209,126 @@ export function categoryBreakdown(list, type) {
   });
   return Object.entries(map).sort((a, b) => b[1] - a[1]);
 }
-export function openingBalance() {
+/* ============================================================
+   期初結餘（逐年）
+   ------------------------------------------------------------
+   每一個財政年度都有自己嘅期初結餘：
+     2025-26 期初 8,803.28 → 期末 7,846.64
+     2026-27 期初 7,846.64（= 上年度期末）→ 加減本年度收支 = 現在結餘
+   所以「期初結餘」唔可以得一個全域數字，否则會把上年度嘅期初
+   當成本年度嘅期初（見 2026-09-15 修正）。
+
+   來源優先次序：
+     1) settings.openingBalances[年度]      ← 明確填咗嘅（例：2026-27 = 7846.64）
+     2) 結轉：全期起點 + 該年度開始前所有帳目   ← 有舊帳就自動計到
+   ============================================================ */
+
+/** 全期起點（舊欄位，即「由頭開始嗰陣有幾多錢」） */
+export function legacyOpening() { return Number(settings().openingBalance || 0); }
+
+/** 明確設定咗嘅逐年期初結餘表 { '2026-27': 7846.64 } */
+export function openingBalances() { return settings().openingBalances || {}; }
+
+/** 而家所屬嘅年度（童軍年度 4/1–3/31；同旅年度標籤一致時最簡單） */
+export function currentFY() {
   const s = settings();
-  return { amount: Number(s.openingBalance || 0), date: s.openingBalanceDate || '' };
+  return scoutFYLabel(todayISO(), Number(s.scoutFYStartMonth || 4));
 }
-/** 某段期間嘅結餘（期初 + 期間收入 − 期間支出） */
-export function balanceAt(startISO) {
-  const before = tx().filter(t => String(t.date) < startISO);
-  return openingBalance().amount + balance(before);
+export function currentFYRange() {
+  const s = settings();
+  return scoutFYRange(currentFY(), Number(s.scoutFYStartMonth || 4), Number(s.scoutFYStartDay || 1));
+}
+/** 上一個年度標籤（例：2026-27 → 2025-26） */
+export function prevFYKey(yearKey = currentFY()) {
+  const y = Number(String(yearKey).split('-')[0]);
+  return `${y - 1}-${pad2y(y % 100)}`;
+}
+function pad2y(n) { return String(n).padStart(2, '0'); }
+
+/** 結轉：某年度開始之前嘅累計（全期起點 + 之前所有帳目） */
+export function carriedForward(startISO) {
+  const before = tx().filter(t => String(t.date).slice(0, 10) < startISO);
+  return legacyOpening() + balance(before);
+}
+/** 某段期間嘅結餘（全期起點 + 該日之前所有帳目） */
+export function balanceAt(startISO) { return carriedForward(startISO); }
+
+/**
+ * 某年度嘅期初結餘。
+ * @param {string} yearKey 例 '2026-27'（預設＝本年度）
+ * @param {object} [range] 該年度範圍（冇傳就用童軍年度計）
+ */
+export function openingOf(yearKey = currentFY(), range = null) {
+  const map = openingBalances();
+  if (map[yearKey] !== undefined && map[yearKey] !== null && map[yearKey] !== '') {
+    return { amount: Number(map[yearKey]), year: yearKey, explicit: true, date: (range || yearRange(yearKey)).start };
+  }
+  const r = range || yearRange(yearKey);
+  return { amount: carriedForward(r.start), year: yearKey, explicit: false, date: r.start };
+}
+/** 由年度標籤攞範圍（童軍年度） */
+export function yearRange(yearKey) {
+  const s = settings();
+  return scoutFYRange(yearKey, Number(s.scoutFYStartMonth || 4), Number(s.scoutFYStartDay || 1));
+}
+
+/** 兼容舊寫法：而家回傳「本年度」嘅期初結餘（唔再係全域單一數字） */
+export function openingBalance() {
+  const o = openingOf();
+  return { amount: o.amount, date: o.date, year: o.year, explicit: o.explicit };
 }
 
 /* ---------- 現在結餘（首頁顯示用） ----------
-   重要：結餘 = 期初結餘 + 全部收入 − 全部支出。
-   只計收入減支出（唔加期初）會令人見到「負數」而誤會執漏數。 */
+   現在結餘 = **本年度**期初結餘 + **本年度**收入 − **本年度**支出。
+   上年度嘅帳目已經計入「上年度期末 → 本年度期初」，唔會重複加。 */
 export function currentBalance() {
-  return openingBalance().amount + balance(tx());
+  const r = currentFYRange();
+  const o = openingOf(r.key, r);
+  const rows = tx().filter(t => inRange(t.date, r.start, r.end));
+  return o.amount + balance(rows);
 }
-/** 結餘拆解（期初／收入／支出／現在），用嚟顯示同解釋負數 */
+/** 結餘拆解（本年度），用嚟顯示同解釋負數 */
 export function balanceBreakdown() {
-  const list = tx();
+  const s = settings();
+  const r = currentFYRange();
+  const list = tx().filter(t => inRange(t.date, r.start, r.end));
   const inc = sumBy(list, 'income');
   const exp = sumBy(list, 'expense');
-  const open = openingBalance().amount;
-  const now = open + inc - exp;
-  const ob = openingBalance();
+  const o = openingOf(r.key, r);
+  const now = o.amount + inc - exp;
+  const prevKey = prevFYKey(r.key);
+  const prevRange = yearRange(prevKey);
+  const prevRows = tx().filter(t => inRange(t.date, prevRange.start, prevRange.end));
+  const prev = openingOf(prevKey, prevRange);
+  const ref = load().reference || {};
+  const refOpen = Number(ref.openingBalance || 0);
+  const refInc = sumBy(ref.transactions || [], 'income');
+  const refExp = sumBy(ref.transactions || [], 'expense');
+  const refClose = ref.check?.closing ?? (refOpen + refInc - refExp);
   return {
-    opening: open, openingDate: ob.date, income: inc, expense: exp, now,
-    count: list.length,
-    hasOpening: open !== 0,
-    /** 負數但其實只係未填期初結餘（最常見嘅原因） */
-    likelyMissingOpening: now < 0 && !open && (load().reference?.openingBalance || 0) > 0,
-    referenceOpening: Number(load().reference?.openingBalance || 0),
+    year: r.key, range: r,
+    opening: o.amount, openingDate: o.date, openingExplicit: o.explicit,
+    income: inc, expense: exp, now, count: list.length,
+    hasOpening: o.explicit || legacyOpening() !== 0,
+    /** 上年度（用嚟對數：上年度期末應該等於本年度期初） */
+    prevYear: prevKey, prevOpening: prev.amount,
+    prevClosing: prev.amount + balance(prevRows), prevCount: prevRows.length,
+    /** 舊帳參考（你嘅 Google Sheet 分頁） */
+    referenceOpening: refOpen, referenceClosing: Number(refClose) || 0,
+    referenceYear: refYearKey(ref),
+    likelyMissingOpening: now < 0 && !o.explicit && legacyOpening() === 0 && refOpen > 0,
     /** 有舊帳參考但未入帳 → 提示去匯入 */
-    hasUnimportedReference: (load().reference?.transactions || []).length > 0 && list.length === 0
+    hasUnimportedReference: (ref.transactions || []).length > 0 && tx().length === 0,
+    /** 本年度期初 同 舊帳期末 唔同 → 提示核對 */
+    openingMismatch: o.explicit && refOpen > 0 && Math.abs(o.amount - Number(refClose)) > 0.005,
+    scoutFYStartMonth: Number(s.scoutFYStartMonth || 4)
   };
+}
+/** 由參考資料推算佢屬於邊個年度（由帳目日期計，唔靠分頁名） */
+export function refYearKey(ref = load().reference || {}) {
+  const dates = (ref.transactions || []).map(t => String(t.date).slice(0, 10)).filter(Boolean).sort();
+  if (!dates.length) return '';
+  return scoutFYLabel(dates[dates.length - 1], Number(settings().scoutFYStartMonth || 4));
 }
 export function pendingClaims() { return claims().filter(c => (c.status || 'pending') === 'pending'); }
 
