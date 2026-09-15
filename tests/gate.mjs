@@ -71,6 +71,32 @@ ok('未揀旅團之前唔會初始化資料庫',
   !window.localStorage.getItem('venture82.unit.0082.db.v2'), '（應該要揀完先種入資料）');
 ok('登入表單未出現', !doc.getElementById('loginForm'));
 
+/* 新旅團申請接入：真正 render 出嚟，唔係 grep 原始碼 */
+ok('旅團閘有「新旅團申請接入」入口', !!doc.querySelector('[data-act="apply"]'));
+ok('閘面講明每旅團用自己嘅後端', /每個旅團用自己嘅 Google Sheet 做後端/.test(appText()));
+const applyBtn = doc.querySelector('[data-act="apply"]');
+applyBtn.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+await wait(120);
+const apBody = doc.body.textContent || '';
+ok('撳「申請接入」會開對話框', /新旅團申請接入/.test(apBody) && !!doc.getElementById('ap-id'));
+ok('申請表有齊欄位（編號／名稱／後端網址／API Key／聯絡人）',
+  ['ap-id','ap-name','ap-url','ap-key','ap-contact','ap-note'].every(id => !!doc.getElementById(id)),
+  ['ap-id','ap-name','ap-url','ap-key','ap-contact','ap-note'].filter(id => !doc.getElementById(id)).join(','));
+ok('申請表教埋點起後端（Code.gs → initializeSheets → 部署）',
+  /Code\.gs/.test(apBody) && /initializeSheets/.test(apBody) && /網頁應用程式/.test(apBody));
+ok('申請表自動帶主系統網址（管理員要用做 portalOrigin）', /portalOrigin/.test(apBody));
+/* 驗證：填錯嘢要擋得住 */
+{
+  const ob = await import('../assets/js/lib/onboard.js');
+  const bad = ob.validateApplication({ troopId: '', troopName: '', scriptUrl: 'http://x.com' });
+  ok('空申請唔會通過驗證', bad.ok === false && bad.errors.length >= 3, JSON.stringify(bad.errors));
+  const good = ob.validateApplication({ troopId: '0100', troopName: '第一百旅',
+    scriptUrl: 'https://script.google.com/macros/s/AKfycbTESTTESTTESTTESTTESTTESTTEST/exec' });
+  ok('填齊就通過，payload 帶 appType=82venture',
+    good.ok === true && good.payload.appType === '82venture', JSON.stringify(good.errors));
+  ok('管理員收件匣已設定', ob.adminInbox().configured === true, ob.adminInbox().url);
+}
+
 /* ---------- ② 揀咗旅團 ---------- */
 console.log('\n▌揀旅團之後');
 const btn = doc.querySelector('[data-pick="0082"]');

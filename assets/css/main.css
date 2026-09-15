@@ -646,6 +646,11 @@ pre.code { background:#2A1015; color:#F6E7EA; padding:14px 16px; border-radius:1
 .gate-unit.mock .code { color:#8A6E12; }
 .gate-unit[disabled] { opacity:.5; cursor:not-allowed; }
 .gate-foot { margin-top:16px; font-size:12.5px; color:var(--muted); line-height:1.7; }
+/* 新旅團申請接入 */
+.gate-apply { margin-top:14px; padding:12px 14px; border:1px dashed var(--line-2); border-radius:12px;
+  background:var(--bg-2); display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+.gate-apply .semibold { font-size:13px; }
+.gate-apply code { font-size:11px; }
 
 /* ---------- 儀表板結餘流程 ---------- */
 .bal-flow { display:flex; align-items:stretch; gap:8px; flex-wrap:wrap; }

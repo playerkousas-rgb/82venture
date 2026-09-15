@@ -1472,6 +1472,50 @@ console.log('\n▌跨系統身份 key（進度追蹤係獨立系統，要靠 key
   ok('Code.gs 團員表帶 systemId 欄', /'systemId'/.test(gsCode));
 }
 
+/* ---------- 新旅團申請接入（#1） ---------- */
+console.log('\n▌新旅團申請接入（送去 ADMIN 收件匣）');
+{
+  const ob = await import('../assets/js/lib/onboard.js');
+  const box = ob.adminInbox();
+  ok('admin 收件匣已設定（data/units.json → admin.submitUrl）', box.configured === true, box.url);
+  ok('收件匣係 Apps Script /exec', /^https:\/\/script\.google\.com\/macros\/s\//.test(box.url), box.url);
+  ok('appType 係 82venture（同 vsbadge 共用收件匣時可以分辨）', ob.APP_TYPE === '82venture');
+
+  const good = ob.validateApplication({
+    troopId: '0100', troopName: '第一百旅深資童軍團',
+    scriptUrl: 'https://script.google.com/macros/s/AKfycbTESTTESTTESTTESTTESTTESTTESTTEST/exec',
+    apiKey: 'K1', contact: 'a@b.hk', note: 'x'
+  });
+  ok('填齊就通過驗證', good.ok === true && good.errors.length === 0, JSON.stringify(good.errors));
+  ok('payload schema 同 VSBADGE submitRegistration 對齊',
+    ['troopId','troopName','scriptUrl','apiKey','appType','note'].every(k => k in good.payload),
+    Object.keys(good.payload).join(','));
+  ok('payload 帶 mainSystemUrl（管理員要用做 portalOrigin）',
+    typeof good.payload.mainSystemUrl === 'string' && good.payload.mainSystemUrl.length > 0,
+    good.payload.mainSystemUrl);
+  ok('payload 帶 at（時間戳）', /^\d{4}-\d{2}-\d{2}T/.test(good.payload.at || ''), good.payload.at);
+
+  const bad = ob.validateApplication({ troopId: '', troopName: '', scriptUrl: 'http://example.com/x' });
+  ok('缺欄位會逐項報錯', bad.ok === false && bad.errors.length >= 3, JSON.stringify(bad.errors));
+  ok('唔係 GAS /exec 嘅後端網址會被擋',
+    bad.errors.some(e => /\/exec/.test(e)), JSON.stringify(bad.errors));
+  ok('旅團編號格式會被驗證',
+    ob.validateApplication({ troopId: '01 00!!', troopName: 'X',
+      scriptUrl: 'https://script.google.com/macros/s/AKfycbTESTTESTTESTTESTTESTTESTTESTTEST/exec' })
+      .errors.some(e => /旅團編號/.test(e)));
+
+  const failed = await ob.submitApplication({ troopId: '', troopName: '', scriptUrl: '' });
+  ok('驗證失敗就唔會送出', failed.ok === false && failed.errors.length > 0, JSON.stringify(failed.errors));
+
+  const cl = ob.adminChecklist('0100');
+  ok('管理員 checklist 有列出兩邊要做嘅嘢',
+    cl.length >= 4 && cl.some(x => x.includes('units.json')) && cl.some(x => x.includes('troops.json')),
+    JSON.stringify(cl));
+  ok('checklist 提埋 portalOrigin / portalRoles',
+    cl.some(x => /portalOrigin/.test(x)), JSON.stringify(cl));
+
+}
+
 /* ---------- 總結 ---------- */
 const ms = Date.now() - t0;
 console.log(`\n──────── ${MODE.toUpperCase()} 測試結果：${pass} 通過 / ${fail} 失敗（${ms} ms）────────`);

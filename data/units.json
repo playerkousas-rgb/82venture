@@ -46,6 +46,13 @@
       }
     }
   },
+  "admin": {
+    "name": "平台管理員收件匣（Apps Script Web App）",
+    "submitUrl": "https://script.google.com/macros/s/AKfycbxj5BDDGgjs559smkK4Z5aYImWYeXbN5af8U1ObON0z9WnsN6QJW4I1XWolhs5kQ_H-UQ/exec",
+    "_howto": "新旅團喺旅團選擇畫面撳「新旅團申請接入」，資料會 POST 去呢度。同 VSBADGE 共用同一個收件匣（用 appType 分辨：82venture / vsbadge）。管理員收到之後要做兩件事：(1) 82venture —— data/units.json 加該旅團 entry（backend.gasUrl / backend.apiKey / progress）+ 建 data/units/<編號>/ 資料夾；(2) VSBADGE —— data/troops.json 加 backend（或 TROOP_<編號>_BACKEND env），並加 portalOrigin / portalRoles 先至可以 portal 免登入。",
+    "_payload": "{ troopId, troopName, scriptUrl, apiKey, appType:'82venture', mainSystemUrl, contact, note, at }",
+    "_note": "呢個 URL 係 VSBADGE 個中央管理員收件匣（api/proxy.js 嘅 SCOUT_ADMIN_API）。如果你嘅 admin GAS 有按 appType 過濾，記得加 '82venture'。"
+  },
   "backend": {
     "name": "82venture 總表（Apps Script Web App）",
     "gasUrl": "https://script.google.com/macros/s/AKfycbySGLBg5KuWzgM9EySiOIppqnzrL0QASIYLlhbCIHocGHcLHKbkMdvmhJvam3baG___/exec",

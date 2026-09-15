@@ -7,6 +7,7 @@ import {
   switchUnit, clearMockData
 } from './lib/store.js';
 import { loadRegistry, unitList, unitEntry, defaultUnitCode } from './lib/units.js';
+import { adminInbox, validateApplication, submitApplication, adminChecklist } from './lib/onboard.js';
 import { applyTheme, MAROON } from './lib/theme.js';
 import {
   login, logout, current, currentRole, ROLES, displayName, displaySub,
@@ -134,9 +135,17 @@ function renderUnitGate() {
         </button>
       </div>
 
+      <div class="gate-apply">
+        <div class="grow">
+          <div class="semibold">你嘅旅團未喺清單入面？</div>
+          <div class="xs faint">每個旅團用自己嘅 Google Sheet 做後端。下載 <code>Code.gs</code> → 建 Sheet → 部署 → 交返網址俾平台管理員開戶。</div>
+        </div>
+        <button class="btn btn-sm" data-act="apply">${icon('plus', 15)} 新旅團申請接入</button>
+      </div>
+
       <div class="gate-foot">
         揀完之後先會出現<b>登入畫面</b>（領袖 / 執行委員會）。<br>
-        想加多一個旅團？喺 <code>data/units.json</code> 註冊，再 copy 一個 <code>data/units/&lt;編號&gt;/</code> 資料夾（詳見 docs/ADD_NEW_UNIT.md）。
+        管理員手工加旅團嘅話：喺 <code>data/units.json</code> 註冊，再 copy 一個 <code>data/units/&lt;編號&gt;/</code> 資料夾（詳見 docs/ADD_NEW_UNIT.md）。
       </div>
     </div>
   </div>`;
@@ -150,6 +159,79 @@ function renderUnitGate() {
     u.hash = '';
     location.href = u.toString();
   }));
+
+  app.querySelector('[data-act="apply"]')?.addEventListener('click', openApplication);
+}
+
+/* ============================================================
+   新旅團申請接入（送去平台管理員收件匣）
+   ============================================================ */
+async function openApplication() {
+  const box = adminInbox();
+  let mainUrl = '';
+  try { mainUrl = location.origin; } catch (e) { mainUrl = ''; }
+  const r = await modal({
+    title: '新旅團申請接入', wide: true,
+    sub: box.configured ? '申請會送去做平台管理員' : '（未設定收件匣）',
+    body: `
+      <div class="note-box mb-12">${icon('alert', 15)}<div>
+        <b>申請之前請先起好你自己嘅後端</b>（每個旅團一張自己嘅 Google Sheet）：
+        <div class="xs mt-4">
+          1. 登入後去「表格與同步 → 總表同步」下載 <b>Code.gs</b><br>
+          2. 建一張新 Google Sheet → 擴充功能 → Apps Script → 貼上 Code.gs<br>
+          3. 執行 <code>initializeSheets</code>（會建好全部分頁），複製 API Key<br>
+          4. 部署做<b>網頁應用程式</b>（執行身分：我；存取權：任何人），複製 <code>/exec</code> 網址
+        </div></div></div>
+      <div class="grid g-2" style="gap:12px">
+        <div class="field"><label class="label">旅團編號 <span class="req">*</span></label>
+          <input class="input" id="ap-id" placeholder="例：0100" maxlength="32"></div>
+        <div class="field"><label class="label">旅團名稱 <span class="req">*</span></label>
+          <input class="input" id="ap-name" placeholder="例：第一百旅深資童軍團"></div>
+        <div class="field" style="grid-column:1/-1"><label class="label">你嘅後端 Apps Script <code>/exec</code> 網址 <span class="req">*</span></label>
+          <input class="input" id="ap-url" placeholder="https://script.google.com/macros/s/…/exec"></div>
+        <div class="field"><label class="label">API Key</label>
+          <input class="input" id="ap-key" placeholder="執行 initializeSheets 之後顯示嗰個"></div>
+        <div class="field"><label class="label">聯絡人（電郵／電話）</label>
+          <input class="input" id="ap-contact" placeholder="例：scouter@example.hk"></div>
+        <div class="field" style="grid-column:1/-1"><label class="label">備註</label>
+          <input class="input" id="ap-note" placeholder="例：想同時接入進度追蹤系統"></div>
+        <div class="field" style="grid-column:1/-1"><label class="label">主系統網址（自動帶）</label>
+          <input class="input" value="${esc(mainUrl)}" readonly style="font-family:var(--mono);font-size:12px;background:var(--bg-2)">
+          <div class="hint">呢個係<b>你而家睇緊嘅呢個網站</b>嘅網址。管理員要用佢做進度系統嘅 <code>portalOrigin</code>（核准邊個網站可以帶身份入去）。</div></div>
+      </div>
+      <div class="hint mt-8">送出後管理員會把你嘅後端網址加進兩邊嘅 Registry（82venture ＋ 進度追蹤系統），完成開戶同連通。</div>`,
+    actions: [
+      { label: '取消', class: 'btn', value: null },
+      { label: '送出申請', class: 'btn-primary', onClick: el => ({
+        troopId: el.querySelector('#ap-id').value,
+        troopName: el.querySelector('#ap-name').value,
+        scriptUrl: el.querySelector('#ap-url').value,
+        apiKey: el.querySelector('#ap-key').value,
+        contact: el.querySelector('#ap-contact').value,
+        note: el.querySelector('#ap-note').value
+      }) }
+    ]
+  });
+  if (!r) return;
+  const v = validateApplication(r);
+  if (!v.ok) { toast(v.errors[0], 'err'); return openApplication(); }
+  toast('送出中…', 'info');
+  const res = await submitApplication(r);
+  if (res.ok) {
+    await modal({
+      title: '申請已送出', sub: `${res.payload.troopId} · ${res.payload.troopName}`,
+      body: `<div class="note-box info mb-12">${icon('check', 15)}<div>
+          你嘅申請已經送去做平台管理員（${res.ms} ms）。<br>
+          <span class="xs">管理員會把你嘅後端網址加進 Registry，完成之後用同一條網址就可以揀到你嘅旅團。</span></div></div>
+        <div class="xs faint">管理員要做嘅嘢（自動列出，方便你跟進）：</div>
+        <ol class="xs mono" style="padding-left:18px;line-height:1.9">
+          ${adminChecklist(res.payload.troopId).map(x => `<li>${esc(x)}</li>`).join('')}
+        </ol>`,
+      actions: [{ label: '好', class: 'btn-primary', value: true }]
+    });
+  } else {
+    toast(res.errors?.[0] || '送出失敗', 'err');
+  }
 }
 
 function loadingScreen() {
