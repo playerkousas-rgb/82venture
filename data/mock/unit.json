@@ -53,7 +53,8 @@
   },
   "progress": {
     "name": "進度系統（示範）",
-    "url": "https://script.google.com/macros/s/AKfycbxqQ3JnEdSRnxlhoSEasa6-wX5F58p3dMqBiQRj1zg-SDn7YtFLBKykN5LiWcadgRdCBg/exec",
+    "_url_note": "示範用：填對方系統嘅**前端**網址（唔係 GAS /exec）",
+    "url": "https://vsbadge.vercel.app/",
     "mode": "portal",
     "portal": {
       "unitParam": "MOCK",

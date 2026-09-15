@@ -19,6 +19,19 @@ let showEmbed = false;
 
 export function title() { return '進度紀錄'; }
 
+/* 對方系統（VSBADGE）認得嘅角色 —— 由佢 index.html 嘅 can_tick 名單核實：
+   ['admin','group_leader','branch_leader','exec_committee','super_admin'] 先有勾選／管理權。
+   填錯角色（例如 'exco'）對方會當你冇權限，所以呢度用 select 唔畀手填。 */
+export const PROGRESS_ROLES = [
+  { v: 'exec_committee', l: '執委（exec_committee）', tick: true },
+  { v: 'branch_leader', l: '支部領袖（branch_leader）', tick: true },
+  { v: 'group_leader', l: '團長（group_leader）', tick: true },
+  { v: 'admin', l: '管理員（admin）', tick: true },
+  { v: 'super_admin', l: '超級管理員（super_admin）', tick: true },
+  { v: 'member', l: '團員（member）—— 只可以睇自己', tick: false }
+];
+export const TICK_ROLES = PROGRESS_ROLES.filter(r => r.tick).map(r => r.v);
+
 function cfg() {
   const p = profile();
   const db = load();
@@ -65,10 +78,21 @@ export function readiness() {
   const act = members().filter(m => m.status === 'active');
   const checks = [
     { ok: !!c.url, label: '進度系統網址已填', detail: c.url || '（未填 —— 撳「設定」）' },
-    { ok: /^https:\/\//.test(c.url || ''), label: '網址係 HTTPS（Apps Script /exec）', detail: c.url ? c.url.slice(0, 48) + '…' : '—' },
+    { ok: /^https:\/\//.test(c.url || ''), label: '網址係 HTTPS', detail: c.url ? c.url.slice(0, 48) + '…' : '—' },
+    /* 要填**前端**網址。填 GAS /exec 會見到 JSON 錯誤頁（{"success":false,"error":"Unknown action"}）
+       而唔係系統介面 —— 對方 v3.0 起由自己嘅同源 /api/proxy 搵旅團後端。 */
+    { ok: !/\/macros\/s\//.test(c.url || ''), label: '網址係系統前端（唔係 GAS /exec）',
+      detail: /\/macros\/s\//.test(c.url || '') ? '⚠ 呢條係 Apps Script API 端點，開出嚟會係 JSON 錯誤頁 —— 請改填對方嘅前端網址' : (c.url || '—') },
     { ok: !!c.mode, label: '已揀連接模式', detail: { portal: 'Portal 信任模式（免密碼）', dedicated: '專用帳戶', link: '只開連結' }[c.mode] || c.mode },
     { ok: c.mode !== 'portal' || !!(c.portal?.unitParam), label: 'Portal 帶旅團編號（u）', detail: c.portal?.unitParam || '（未填）' },
-    { ok: c.mode !== 'portal' || !!(c.portal?.role), label: 'Portal 帶角色（role）', detail: c.portal?.role || '（未填）' },
+    /* 對方 index.html：if (from==='portal' && ymis && role) 先會免登入進入。
+       冇 ymis 就會跌返去登入頁 —— 即係「連通」表面成功、實際冇帶到身份。 */
+    { ok: c.mode !== 'portal' || !!(c.portal?.ymis || '').trim(), label: 'Portal 帶身份（ymis）—— 對方必要欄位',
+      detail: (c.portal?.ymis || '').trim() || '（未填 → 對方會跌返登入頁，唔會免登入進入）' },
+    { ok: c.mode !== 'portal' || TICK_ROLES.includes(c.portal?.role), label: 'Portal 角色有管理／勾選權',
+      detail: c.portal?.role
+        ? (TICK_ROLES.includes(c.portal?.role) ? c.portal?.role : `⚠ 「${c.portal?.role}」對方唔認，會當你冇權限`)
+        : '（未填）' },
     { ok: c.mode !== 'dedicated' || !!(c.dedicated?.username && c.dedicated?.password), label: c.mode === 'dedicated' ? '專用帳戶帳密已填' : '唔需要專用帳戶帳密', detail: c.mode === 'dedicated' ? (c.dedicated?.username || '（未填）') : '—' },
     { ok: act.length > 0, label: `名冊有現役用戶（${act.length} 位）`, detail: act.slice(0, 3).map(m => m.name).join('、') + (act.length > 3 ? ' 等' : '') },
     { ok: !!buildUrl(c), label: '可以組合出登入連結', detail: buildUrl(c) || '（未有網址）' }
@@ -376,8 +400,11 @@ export function mount(root) {
       title: '設定進度系統接駁', wide: true,
       body: `
         <div class="grid g-2" style="gap:12px">
-          <div class="field" style="grid-column:1/-1"><label class="label">進度系統網址 <span class="req">*</span></label>
-            <input class="input" id="q-url" value="${esc(cc.url)}" placeholder="https://script.google.com/macros/s/…/exec"></div>
+          <div class="field" style="grid-column:1/-1"><label class="label">進度系統<b>前端</b>網址 <span class="req">*</span></label>
+            <input class="input" id="q-url" value="${esc(cc.url)}" placeholder="例：https://vsbadge.vercel.app/">
+            <div class="hint">要填對方系統嘅<b>網頁網址</b>，<b>唔好</b>填 Google Apps Script 嘅 <code>/exec</code> ——
+              嗰條係 API 端點，開出嚟只會見到 <code>{"success":false,"error":"Unknown action"}</code>。
+              對方 v3.0 起由佢自己嘅同源 <code>/api/proxy</code> 搵旅團後端，呢邊<b>只需要帶旅團編號</b>，唔使填後端網址同 API Key。</div></div>
           <div class="field" style="grid-column:1/-1"><label class="label">顯示名稱</label>
             <input class="input" id="q-name" value="${esc(cc.name)}"></div>
           <div class="field"><label class="label">連接模式</label>
@@ -387,11 +414,17 @@ export function mount(root) {
               <option value="link" ${cc.mode === 'link' ? 'selected' : ''}>只開連結</option>
             </select></div>
           <div class="field"><label class="label">Portal 角色</label>
-            <input class="input" id="q-role" value="${esc(cc.portal?.role || 'exec_committee')}" placeholder="exec_committee / branch_leader"></div>
+            <select class="select" id="q-role">
+              ${PROGRESS_ROLES.map(r => `<option value="${r.v}" ${(cc.portal?.role || 'exec_committee') === r.v ? 'selected' : ''}>${esc(r.l)}</option>`).join('')}
+            </select>
+            <div class="hint">揀「團員」嘅話對方只畀睇自己進度；執委／領袖先有勾選同審批權。</div></div>
           <div class="field"><label class="label">旅團編號參數（u）</label>
             <input class="input" id="q-unit" value="${esc(cc.portal?.unitParam || load().unitCode)}"></div>
-          <div class="field"><label class="label">Portal 顯示名（ymis 值）</label>
-            <input class="input" id="q-ymis" value="${esc(cc.portal?.ymis || '')}" placeholder="例：EXCO-82 或留空"></div>
+          <div class="field"><label class="label">Portal 身份（ymis） <span class="req">*</span></label>
+            <input class="input" id="q-ymis" value="${esc(cc.portal?.ymis || '')}" placeholder="例：EXCO-82">
+            <div class="hint"><b>必填</b>。對方嘅判斷係 <code>from=portal &amp;&amp; ymis &amp;&amp; role</code> ——
+              <b>留空就唔會免登入進入</b>，會跌返去登入頁（即係連通失敗）。呢度填執委會共用嘅身份；
+              個別團員嘅 YMIS 喺「用戶」度填，用嚟對進度。</div></div>
           <div class="field"><label class="label">其他參數（& 分隔）</label>
             <input class="input" id="q-extra" value="${esc(cc.portal?.extraParams || 'embed=1')}"></div>
           <div class="field"><label class="label">專用帳戶登入帳號</label>

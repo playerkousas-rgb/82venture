@@ -189,16 +189,31 @@ python3 -m http.server 8000     # 或用任何靜態伺服器（必須用 http:/
 Word／PDF／Markdown／單一 HTML／JSON 匯出、QR Code、
 **公開閱讀頁 `constitution.html`**（免登入、可獨立上載或貼連結）。
 
-### 進度系統接駁
+### 進度系統接駁（聯邦式：兩個系統，一條身份）
+進度追蹤係**獨立系統**（VSBADGE，都係多旅團、同一前端指向唔同後端）。
+呢邊做**入口＋管理**，進度資料由對方擁有 —— 呢邊唔複製、唔做第二份真相。
+
 三種模式，預設 **Portal 信任模式**：
 
 ```
-https://<對方系統>/exec?u=0082&role=exec_committee&ymis=<學員編號>&from=portal&embed=1
+https://vsbadge.vercel.app/?u=0082&role=exec_committee&ymis=EXCO-82&name=執行委員會&from=portal&embed=1
 ```
 
-* 對方系統見到 `from=portal` 就當作「由本平台核准嘅執委」，唔需要再打密碼
+* **要填對方系統嘅「前端」網址**（例 `https://vsbadge.vercel.app/`），
+  **唔好填 Google Apps Script 嘅 `/exec`** —— 嗰條係 API 端點，
+  開出嚟只會見到 `{"success":false,"error":"Unknown action"}` 而唔係系統介面
+  （對方 v3.0 起由佢自己嘅同源 `/api/proxy` 搵旅團後端，GAS URL 唔經瀏覽器）
+* **四個參數缺一不可**（對方 `index.html` 嘅判斷係 `from==='portal' && ymis && role`）：
+  `u`＝旅團編號（要已登記喺對方 Registry）、`role`、`ymis`、`from=portal`。
+  **冇 `ymis` 就會跌返登入頁** —— 表面連通、實際冇帶到身份
+* `role` 要用對方認得嘅值先有勾選／審批權：
+  `exec_committee`／`branch_leader`／`group_leader`／`admin`／`super_admin`（`member` 只可以睇自己）
 * 唔使喺對方系統開新帳號、唔使喺網址帶密碼、唔需要改對方系統
 * 另有「專用帳戶模式」（喺對面系統正常開一個執委帳戶）同「純連結模式」
+
+**跨系統對人靠會籍編號（YMIS）**：用戶頁逐個填（`data/units/0082/members.json` 嘅 `ymis` 欄），
+未填嘅只可以用姓名配對（會撞名、會漏）。用戶頁會顯示 **YMIS 覆蓋率**，
+進度頁會分開顯示「連結就緒」同「身份對齊」兩件事。
 
 ### 教學（內建）
 12 章使用說明：快速開始、帳戶與權限、團章、財務、**日常點輸入**、**手機記帳與通告**、

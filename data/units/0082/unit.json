@@ -80,12 +80,13 @@
   },
   "progress": {
     "name": "深資童軍進度及行政平台 (VSBADGE)",
-    "url": "https://script.google.com/macros/s/AKfycbxqQ3JnEdSRnxlhoSEasa6-wX5F58p3dMqBiQRj1zg-SDn7YtFLBKykN5LiWcadgRdCBg/exec",
+    "url": "https://vsbadge.vercel.app/",
     "mode": "portal",
     "portal": {
       "unitParam": "0082",
       "role": "exec_committee",
-      "ymis": "",
+      "_ymis_note": "Portal 信任模式必須有 ymis（對方 index.html：from=portal && ymis && role 先免登入進入）；留空會跌返登入頁。呢個係執委會共用嘅 portal 身份。",
+      "ymis": "EXCO-82",
       "extraParams": "embed=1"
     },
     "dedicated": {

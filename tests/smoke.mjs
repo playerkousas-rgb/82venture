@@ -1165,14 +1165,24 @@ section('進度追蹤（連通檢查）');
 {
   const pv = await import('../assets/js/views/progress.js');
   const R = pv.readiness();
-  ok('就緒清單有 8 項', R.total === 8, String(R.total));
+  ok('就緒清單有 10 項', R.total === 10, String(R.total));
+  /* 對方（VSBADGE）index.html 嘅實際判斷：
+       if (from==='portal' && ymis && role) → 免登入進入
+     所以 u + from=portal + role + ymis 四樣缺一不可；少一樣就會跌返登入頁。 */
+  ok('Portal 連結有 from=portal（免密碼）', R.url.includes('from=portal'), R.url);
+  ok('Portal 連結帶 ymis（對方必要欄位）', /[?&]ymis=[^&]+/.test(R.url), R.url);
+  ok('Portal 連結帶 u（旅團編號）', /[?&]u=[^&]+/.test(R.url), R.url);
+  ok('Portal 連結帶 role', /[?&]role=[^&]+/.test(R.url), R.url);
+  ok('網址係對方前端而唔係 GAS /exec（實測：/exec 只回 JSON 錯誤頁）',
+    !/\/macros\/s\//.test(store.load().profile?.progress?.url || ''),
+    store.load().profile?.progress?.url);
+  ok('揀嘅角色對方認得而且有勾選權', pv.TICK_ROLES.includes(R.mode === 'portal' ? (R.url.match(/role=([^&]+)/) || [])[1] : ''),
+    R.url);
   if (MODE === 'real') {
     ok('真實旅團已預備好連通進度系統', R.ready === true,
       R.checks.filter(c => !c.ok).map(c => c.label).join(' / '));
-    ok('進度系統網址係 Apps Script /exec', /\/exec$/.test(store.load().profile?.progress?.url || ''),
-      store.load().profile?.progress?.url);
-    ok('Portal 模式帶 u=0082 同 role', R.url.includes('u=0082') && R.url.includes('role=exec_committee'), R.url);
-    ok('Portal 連結有 from=portal（免密碼）', R.url.includes('from=portal'), R.url);
+    ok('Portal 模式帶 u=0082 同 role=exec_committee',
+      R.url.includes('u=0082') && R.url.includes('role=exec_committee'), R.url);
   } else {
     ok('示範模式都有自己嘅進度系統設定（示範用）', R.ready === true,
       R.checks.filter(c => !c.ok).map(c => c.label).join(' / '));
@@ -1368,13 +1378,15 @@ console.log('\n▌跨系統身份 key（進度追蹤係獨立系統，要靠 key
   ok('乜都冇 → key 係空', model.memberKey({}).key === '');
 
   const keepY = first.ymis;
+  const ymisBase = model.keyCoverage(store.load().members).withYmis;   // 基準（seed 可能已有真實 YMIS）
   first.ymis = 'TEST-YMIS-1';
   store.commit();
   ok('findByKey 用 YMIS 搵到人', model.findByKey('TEST-YMIS-1')?.id === first.id);
   ok('findByKey 用 systemId 搵到人', model.findByKey(first.systemId)?.id === first.id);
   ok('findByKey 搵唔到會回 null', model.findByKey('NO-SUCH-KEY') === null);
   ok('YMIS 覆蓋率跟實際填入數一致',
-    model.keyCoverage(store.load().members).withYmis === 1, String(model.keyCoverage(store.load().members).withYmis));
+    model.keyCoverage(store.load().members).withYmis === ymisBase + (keepY ? 0 : 1),
+    `${model.keyCoverage(store.load().members).withYmis} vs base ${ymisBase}`);
   first.ymis = keepY;
   store.commit();
 
