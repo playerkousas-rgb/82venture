@@ -56,11 +56,58 @@ function buildUrl(c) {
   return qs.toString() ? c.url + sep + qs.toString() : c.url;
 }
 
+/* ============================================================
+   就緒檢查（呢個系統係咪已經預備好連通進度追蹤？）
+   ============================================================ */
+export function readiness() {
+  const c = cfg();
+  const db = load();
+  const act = members().filter(m => m.status === 'active');
+  const checks = [
+    { ok: !!c.url, label: '進度系統網址已填', detail: c.url || '（未填 —— 撳「設定」）' },
+    { ok: /^https:\/\//.test(c.url || ''), label: '網址係 HTTPS（Apps Script /exec）', detail: c.url ? c.url.slice(0, 48) + '…' : '—' },
+    { ok: !!c.mode, label: '已揀連接模式', detail: { portal: 'Portal 信任模式（免密碼）', dedicated: '專用帳戶', link: '只開連結' }[c.mode] || c.mode },
+    { ok: c.mode !== 'portal' || !!(c.portal?.unitParam), label: 'Portal 帶旅團編號（u）', detail: c.portal?.unitParam || '（未填）' },
+    { ok: c.mode !== 'portal' || !!(c.portal?.role), label: 'Portal 帶角色（role）', detail: c.portal?.role || '（未填）' },
+    { ok: c.mode !== 'dedicated' || !!(c.dedicated?.username && c.dedicated?.password), label: c.mode === 'dedicated' ? '專用帳戶帳密已填' : '唔需要專用帳戶帳密', detail: c.mode === 'dedicated' ? (c.dedicated?.username || '（未填）') : '—' },
+    { ok: act.length > 0, label: `名冊有現役用戶（${act.length} 位）`, detail: act.slice(0, 3).map(m => m.name).join('、') + (act.length > 3 ? ' 等' : '') },
+    { ok: !!buildUrl(c), label: '可以組合出登入連結', detail: buildUrl(c) || '（未有網址）' }
+  ];
+  const last = db.settings?.progressCheck || null;
+  return { checks, pass: checks.filter(x => x.ok).length, total: checks.length, ready: checks.every(x => x.ok), last, url: buildUrl(c) || c.url, name: c.name, mode: c.mode };
+}
+
+/** 由瀏覽器實際 ping 一次（Apps Script 多數唔畀讀回應，所以只報告可達性） */
+export async function checkConnection(url, timeoutMs = 12000) {
+  const started = Date.now();
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { method: 'GET', mode: 'no-cors', cache: 'no-store', signal: ctrl.signal });
+    clearTimeout(timer);
+    return {
+      ok: true, opaque: res.type === 'opaque', status: res.status || 0,
+      ms: Date.now() - started, at: new Date().toISOString().slice(0, 19).replace('T', ' '),
+      msg: res.type === 'opaque'
+        ? '有回應（Apps Script 唔畀瀏覽器讀內容，屬正常）—— 網址可達'
+        : `HTTP ${res.status}`
+    };
+  } catch (e) {
+    clearTimeout(timer);
+    const aborted = e?.name === 'AbortError';
+    return {
+      ok: false, ms: Date.now() - started, at: new Date().toISOString().slice(0, 19).replace('T', ' '),
+      msg: aborted ? `逾時（${Math.round(timeoutMs / 1000)} 秒冇回應）` : (e?.message || String(e))
+    };
+  }
+}
+
 export function render() {
   const c = cfg();
   const url = c.url;
   const launch = buildUrl(c);
   const role = c.portal?.role || 'exec_committee';
+  const R = readiness();
 
   return `
   ${pageHead({
@@ -165,6 +212,28 @@ export function render() {
 
     <div class="col gap-16">
       <div class="card">
+        <div class="card-head">
+          <div><div class="card-title">連通進度追蹤：準備好未？</div>
+            <div class="card-sub">${R.pass} / ${R.total} 項完成${R.last ? ` · 上次檢查 ${esc(R.last.at)}` : ''}</div></div>
+          <span class="badge ${R.ready ? 'b-ok' : 'b-warn'}"><span class="dot"></span>${R.ready ? '已預備好' : '未齊'}</span>
+        </div>
+        <div style="padding:12px 16px">
+          ${R.checks.map(k => `<div class="row gap-10" style="padding:6px 0;border-bottom:1px solid var(--line-2)">
+            <span style="color:${k.ok ? 'var(--ok)' : 'var(--warn)'}">${icon(k.ok ? 'check' : 'alert', 15)}</span>
+            <div class="grow" style="min-width:0"><div class="sm">${esc(k.label)}</div>
+              <div class="xs faint mono" style="word-break:break-all">${esc(String(k.detail).slice(0, 70))}</div></div>
+          </div>`).join('')}
+          <div class="row gap-8 mt-12 wrap">
+            <button class="btn btn-sm btn-primary" data-act="check">${icon('send', 15)} 檢查連線（實測）</button>
+            ${can('progress.config') ? `<button class="btn btn-sm" data-act="config">${icon('settings', 15)} 設定</button>` : ''}
+          </div>
+          <div id="progCheckOut" class="hint mt-8">${R.last
+            ? `上次結果：${R.last.ok ? '✓' : '✗'} ${esc(R.last.msg)}（${R.last.ms} ms）`
+            : '未做過實測。撳「檢查連線」會由你嘅瀏覽器直接 ping 一次進度系統。'}</div>
+        </div>
+      </div>
+
+      <div class="card">
         <div class="card-head"><div class="card-title">本系統保留嘅進度相關資料</div></div>
         <div>
           ${members().filter(m => m.status === 'active').slice(0, 8).map(m => `
@@ -210,6 +279,25 @@ export function mount(root) {
   root.querySelectorAll('[data-act="open"]').forEach(b => b.addEventListener('click', () => {
     if (launch) window.open(launch, '_blank', 'noopener');
     else toast('未設定網址', 'err');
+  }));
+
+  root.querySelectorAll('[data-act="check"]').forEach(b => b.addEventListener('click', async () => {
+    const out = root.querySelector('#progCheckOut');
+    const target = launch || c.url;
+    if (!target) { toast('未設定進度系統網址', 'err'); return; }
+    b.disabled = true;
+    if (out) out.textContent = '檢查中…（最多等 12 秒）';
+    const res = await checkConnection(target);
+    const db = load();
+    db.settings = { ...(db.settings || {}), progressCheck: { ...res, url: target } };
+    commit();
+    if (out) {
+      out.innerHTML = `${res.ok ? '<b style="color:var(--ok)">✓ 連通</b>' : '<b style="color:var(--danger)">✗ 連唔通</b>'} · ${esc(res.msg)} · ${res.ms} ms`
+        + (res.ok && res.opaque ? `<div class="xs faint mt-4">註：Apps Script 預設唔會回傳跨網域內容，所以瀏覽器讀唔到 JSON；
+          要睇返傳資料，請撳「開啟」用新分頁測試。</div>` : '');
+    }
+    b.disabled = false;
+    toast(res.ok ? '進度系統可達' : '連唔通進度系統', res.ok ? 'ok' : 'err');
   }));
 
   root.querySelectorAll('[data-act="copy-url"]').forEach(b => b.addEventListener('click', async () => {

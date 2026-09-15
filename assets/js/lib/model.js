@@ -17,6 +17,56 @@ export function money(n) {
   return currency() + v.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 2 });
 }
 
+/* ---------------- 公開頁連結（成員免登入用） ----------------
+   entry.html      手機記一筆（收支申報）
+   borrow.html     物資借用申請
+   notice.html     通告 + 回覆出席與否
+   constitution.html 團章
+   全部都可以喺「帳號與系統 → 旅團設定」或者「成員連結」頁改做自己嘅網址。 */
+export function publicPageUrl(file, params = {}) {
+  const s = settings().publicLinks || {};
+  const origin = (typeof location !== 'undefined' && location.origin && location.origin !== 'null')
+    ? location.origin + String(location.pathname).replace(/[^/]*$/, '')
+    : '';
+  const target = s[file] || s.base || (origin ? origin + file : file);
+  let url;
+  try { url = new URL(target, origin || undefined); }
+  catch { return target; }
+  Object.entries(params).forEach(([k, v]) => {
+    if (v !== undefined && v !== null && v !== '') url.searchParams.set(k, v);
+  });
+  return url.toString();
+}
+/** 成員用嘅公開連結清單（「成員連結」頁同 QR 都用呢個） */
+export function memberLinks() {
+  const code = load().unitCode;
+  const out = [
+    {
+      id: 'entry', icon: 'camera', label: '收支申報（手機記一筆）',
+      desc: '成員影相 → 揀欄目 → 金額 → 送出，司庫批核後自動入帳（取代 Google Form）',
+      url: publicPageUrl('entry.html', { u: code })
+    },
+    {
+      id: 'borrow', icon: 'grid', label: '物資借用申請',
+      desc: '成員自己申請借物資，執委喺 APP 批核；借出／歸還自動加減庫存',
+      url: publicPageUrl('borrow.html', { u: code })
+    },
+    {
+      id: 'constitution', icon: 'book', label: '團章（公開閱讀）',
+      desc: '免登入閱讀最新版團章，可輸出 Word / PDF',
+      url: publicPageUrl('constitution.html', { u: code })
+    }
+  ];
+  collection('notices').filter(n => n.status === 'published').slice(0, 40).forEach(n => {
+    out.push({
+      id: 'notice:' + n.id, icon: 'megaphone', label: `通告：${n.title?.zh || n.id}`,
+      desc: `免登入閱讀${n.needSignup ? '＋回覆出席與否' : ''}${n.deadline ? `（截止 ${n.deadline}）` : ''}`,
+      url: publicPageUrl('notice.html', { u: code, n: n.id })
+    });
+  });
+  return out;
+}
+
 /* ---------------- 會議 ---------------- */
 export const MEETING_STATUS = {
   draft:     { label: '草稿',   cls: 'b-grey' },
@@ -38,7 +88,35 @@ export function statusBadge(s) {
   return `<span class="badge ${m.cls}"><span class="dot"></span>${m.label}</span>`;
 }
 
-/* ---------------- 團員 ---------------- */
+/* ---------------- 團員 / 用戶 ---------------- */
+/**
+ * 身份（呢個系統管嘅係「用戶」：領袖、執委、團員都可能喺名冊入面）
+ * identity = 系統身份（決定權限層級、顯示）
+ * role     = 團內職位（自由文字，例：主席 / 司庫 / 小隊長）
+ */
+export const IDENTITIES = {
+  leader: { l: '領袖', short: '領袖', c: 'b-brand', level: 3 },
+  exco:   { l: '執委', short: '執委', c: 'b-info', level: 2 },
+  member: { l: '團員', short: '團員', c: 'b-grey', level: 1 }
+};
+export function identityLabel(m) {
+  const k = m?.identity || 'member';
+  return (IDENTITIES[k] || IDENTITIES.member).l;
+}
+export function identityOf(m) {
+  const k = m?.identity || 'member';
+  return IDENTITIES[k] ? k : 'member';
+}
+/** 由舊資料／職位文字推算身份（升級舊資料庫用） */
+export function guessIdentity(m) {
+  if (m?.identity && IDENTITIES[m.identity]) return m.identity;
+  const t = `${m?.role || ''} ${(m?.tags || []).join(' ')}`.toLowerCase();
+  if (/(團長|領袖|leader|scouter|隊長)/.test(t)) return 'leader';
+  if (/(執委|執行委員會|exco|committee|主席|司庫|文書)/.test(t)) return 'exco';
+  return 'member';
+}
+export function membersByIdentity(k) { return members().filter(m => identityOf(m) === k); }
+
 export function members() { return collection('members'); }
 export function member(id) { return find('members', id); }
 export function memberName(id) { return member(id)?.name || '—'; }
@@ -139,6 +217,32 @@ export function openingBalance() {
 export function balanceAt(startISO) {
   const before = tx().filter(t => String(t.date) < startISO);
   return openingBalance().amount + balance(before);
+}
+
+/* ---------- 現在結餘（首頁顯示用） ----------
+   重要：結餘 = 期初結餘 + 全部收入 − 全部支出。
+   只計收入減支出（唔加期初）會令人見到「負數」而誤會執漏數。 */
+export function currentBalance() {
+  return openingBalance().amount + balance(tx());
+}
+/** 結餘拆解（期初／收入／支出／現在），用嚟顯示同解釋負數 */
+export function balanceBreakdown() {
+  const list = tx();
+  const inc = sumBy(list, 'income');
+  const exp = sumBy(list, 'expense');
+  const open = openingBalance().amount;
+  const now = open + inc - exp;
+  const ob = openingBalance();
+  return {
+    opening: open, openingDate: ob.date, income: inc, expense: exp, now,
+    count: list.length,
+    hasOpening: open !== 0,
+    /** 負數但其實只係未填期初結餘（最常見嘅原因） */
+    likelyMissingOpening: now < 0 && !open && (load().reference?.openingBalance || 0) > 0,
+    referenceOpening: Number(load().reference?.openingBalance || 0),
+    /** 有舊帳參考但未入帳 → 提示去匯入 */
+    hasUnimportedReference: (load().reference?.transactions || []).length > 0 && list.length === 0
+  };
 }
 export function pendingClaims() { return claims().filter(c => (c.status || 'pending') === 'pending'); }
 

@@ -9,7 +9,7 @@ import {
   tx, claims, fees, budgets, categories, methods, money, sumBy, balance, balanceAt,
   feeSummary, overdueFees, pendingClaims, monthStats, allMonths, memberName, member,
   activeMembers, members, settings, profile, listYears, scoutFYRange, unitFYRange, unitFYOf,
-  summarize, openingBalance, currency, agmIsDefault, setAgmDate, lastSaturdayOfAugust,
+  summarize, openingBalance, currentBalance, balanceBreakdown, currency, agmIsDefault, setAgmDate, lastSaturdayOfAugust,
   feePeriodOf, feePeriods, feeOf, feeGrid, feeStats, matchMemberByName,
   standardFee, overseasFee, defaultFeeDue
 } from '../lib/model.js';
@@ -20,6 +20,7 @@ import { go, parse, setQuery } from '../lib/router.js';
 import { can, current } from '../lib/auth.js';
 import { pageHead, tabs, stat, empty, kv, chipbar, noteBox, photoPicker, photoStrip, bindPhotoPicker } from './ui.js';
 import { compressImage, formatBytes, downloadPhotos } from '../lib/files.js';
+import { bindDraftAutosave, readDraft, applyDraft, saveDraft, clearDraft, draftBanner } from '../lib/guard.js';
 
 let tab = 'ledger';
 let fMonth = '';
@@ -37,13 +38,13 @@ export function render(params) {
   const id = params.id;
   if (id === 'new') return txPage(null);
   if (id === 'edit') return txPage(params.action);
-  if (['reports', 'fees', 'claims', 'budgets', 'import'].includes(id)) tab = id;
+  if (['reports', 'fees', 'claims', 'budgets', 'import', 'settings'].includes(id)) tab = id;
   else if (id !== 'new' && id !== 'edit') tab = params?.query?.tab || 'ledger';
   if (params.query?.period) feePeriod = params.query.period;
 
   const header = pageHead({
     title: '財務',
-    sub: `${profile().name || ''} · 結餘 ${money(balance())} · 期初 ${money(openingBalance().amount)}`,
+    sub: `${profile().name || ''} · 現在結餘 ${money(currentBalance())}（期初 ${money(openingBalance().amount)} ＋ 收入 ${money(sumBy(tx(), 'income'))} − 支出 ${money(sumBy(tx(), 'expense'))}）`,
     actions: `
       ${can('finance.create') ? `<button class="btn btn-sm btn-primary" data-act="add">${icon('plus', 15)} 新增收支</button>` : ''}
       <button class="btn btn-sm" data-go="#/finance/reports">${icon('chart', 15)} 年結報告</button>
@@ -57,13 +58,15 @@ export function render(params) {
     ['fees', '團費', fees().filter(f => !f.paid).length],
     ['claims', '收支申報', pendingClaims().length],
     ['budgets', '活動預算', budgets().length],
-    ['import', '匯入舊帳']
+    ['import', '匯入舊帳'],
+    ['settings', '年度設定']
   ], tab)}
   ${tab === 'reports' ? reportsView()
     : tab === 'fees' ? feesView()
     : tab === 'claims' ? claimsView()
     : tab === 'budgets' ? budgetsView()
     : tab === 'import' ? importView()
+    : tab === 'settings' ? settingsView()
     : ledgerView()}`;
 }
 
@@ -87,7 +90,7 @@ function ledgerView() {
     ${stat('收入', money(inc), `${list.filter(t => t.type === 'income').length} 筆`, 'ok')}
     ${stat('支出', money(exp), `${list.filter(t => t.type === 'expense').length} 筆`, 'danger')}
     ${stat('淨額', money(inc - exp), '所選範圍', inc - exp >= 0 ? 'ok' : 'danger')}
-    ${stat('總結餘', money(balance()), `全部 ${tx().length} 筆紀錄`)}
+    ${stat('現在結餘', money(currentBalance()), `期初 ${money(openingBalance().amount)} ＋ 淨額 ${money(balance())} · 全部 ${tx().length} 筆`, currentBalance() < 0 ? 'danger' : '')}
   </div>
 
   <div class="row-between wrap gap-12 mb-16 no-print">
@@ -517,6 +520,104 @@ function budgetsView() {
         </table></div>
       </div>`;
     }).join('') : empty('target', '未有活動預算')}
+  </div>`;
+}
+
+/* ============================================================
+   5b. 年度設定（期初結餘 · 年度起點 · 團費預設）
+   ============================================================ */
+/** 由設定頁欄位收集（儲存同暫存共用） */
+function collectSettings(root) {
+  const v = k => root.querySelector(k)?.value ?? '';
+  return {
+    openingBalance: Number(v('#set-open')) || 0,
+    openingBalanceDate: String(v('#set-opendate')).trim(),
+    scoutFYStartMonth: Number(v('#set-fym')) || 4,
+    scoutFYStartDay: Number(v('#set-fyd')) || 1,
+    feePerYear: Number(v('#set-fee')) || 0,
+    feeOverseas: Number(v('#set-feeovs')) || 0
+  };
+}
+
+function settingsView() {
+  const s = settings();
+  const bal = balanceBreakdown();
+  return `
+  ${bal.now < 0 ? noteBox(
+    `<b>而家結餘係負數（${money(bal.now)}）。</b>最常見原因：<b>期初結餘未填</b>。${
+      bal.referenceOpening ? `你嘅舊帳顯示上年度結餘 <b>${money(bal.referenceOpening)}</b>，填入去就會返正數。` : '請喺下面填返旅團嘅底數。'
+    }`, 'warn') + '<div class="mb-16"></div>' : ''}
+
+  <div class="grid g-2-1">
+    <div class="col gap-16">
+      <div class="card">
+        <div class="card-head"><div><div class="card-title">期初結餘</div>
+          <div class="card-sub">所有結餘都由呢個數起計：現在結餘 ＝ 期初 ＋ 收入 − 支出</div></div></div>
+        <div style="padding:18px 20px">
+          <div class="grid g-2" style="gap:12px">
+            <div class="field"><label class="label">期初結餘（HK$）</label>
+              <input class="input" id="set-open" type="number" step="0.01" data-draft="openingBalance" value="${s.openingBalance || 0}">
+              <div class="hint">通常填「上年度結餘」，例：${bal.referenceOpening ? money(bal.referenceOpening) : '8803.28'}</div></div>
+            <div class="field"><label class="label">期初日期</label>
+              <input class="input" id="set-opendate" data-draft="openingBalanceDate" value="${esc(s.openingBalanceDate || '')}" placeholder="YYYY-MM-DD"></div>
+          </div>
+          <div class="row gap-8 wrap mt-12">
+            ${bal.referenceOpening && Number(s.openingBalance || 0) !== bal.referenceOpening
+              ? `<button class="btn btn-sm" data-act="use-ref-opening">${icon('check', 15)} 用舊帳嘅期初結餘（${money(bal.referenceOpening)}）</button>` : ''}
+            <button class="btn btn-sm" data-go="#/finance/import">${icon('upload', 15)} 匯入舊帳（會一併設定期初）</button>
+          </div>
+          <div class="hint mt-8" data-draft-stamp></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><div><div class="card-title">年度起點</div>
+          <div class="card-sub">童軍年度 4/1–3/31；旅年度由 AGM 起計</div></div>
+          <button class="btn btn-sm" data-act="agm">${icon('calendar', 15)} 逐年輸入 AGM 日期</button></div>
+        <div style="padding:18px 20px">
+          <div class="grid g-2" style="gap:12px">
+            <div class="field"><label class="label">童軍年度起始月</label>
+              <input class="input" id="set-fym" type="number" min="1" max="12" data-draft="scoutFYStartMonth" value="${s.scoutFYStartMonth || 4}"></div>
+            <div class="field"><label class="label">童軍年度起始日</label>
+              <input class="input" id="set-fyd" type="number" min="1" max="31" data-draft="scoutFYStartDay" value="${s.scoutFYStartDay || 1}"></div>
+          </div>
+          <div class="hint">已設定嘅 AGM 日期：${(s.agmDates || []).filter(a => a.date).map(a => `<span class="tag">${esc(String(a.year))} · ${esc(a.date)}${agmIsDefault(a.year, s.agmDates) ? '（未確認）' : ''}</span>`).join(' ') || '<span class="faint">未設定</span>'}</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><div class="card-title">團費預設</div>
+          <div class="card-sub">每位團員每年（可以逐個團員改）</div></div></div>
+        <div style="padding:18px 20px">
+          <div class="grid g-2" style="gap:12px">
+            <div class="field"><label class="label">標準團費</label>
+              <input class="input" id="set-fee" type="number" step="0.01" data-draft="feePerYear" value="${standardFee()}"></div>
+            <div class="field"><label class="label">海外／優惠團費</label>
+              <input class="input" id="set-feeovs" type="number" step="0.01" data-draft="feeOverseas" value="${overseasFee()}"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="row gap-8 wrap no-print">
+        <button class="btn btn-primary" data-act="save-settings-page">${icon('save', 16)} 儲存年度設定</button>
+        <span class="xs faint">改動會先暫存喺呢部裝置，撳「儲存」先寫入。</span>
+      </div>
+    </div>
+
+    <div class="col gap-16">
+      <div class="card">
+        <div class="card-head"><div class="card-title">結餘點計？</div></div>
+        <div style="padding:16px 18px">
+          ${kv([
+            ['期初結餘', money(bal.opening) + (bal.openingDate ? ` <span class="faint xs">(${esc(bal.openingDate)})</span>` : '')],
+            ['＋ 累計收入', money(bal.income)],
+            ['− 累計支出', money(bal.expense)],
+            ['＝ 現在結餘', `<b style="color:${bal.now < 0 ? 'var(--danger)' : 'var(--brand-700)'}">${money(bal.now)}</b>`]
+          ])}
+          <div class="hint mt-12">呢個數同儀表板「現在結餘」一樣。財政年度報告會再按期間（AGM 旅年度 / 童軍年度）拆開計。</div>
+        </div>
+      </div>
+    </div>
   </div>`;
 }
 
@@ -989,6 +1090,21 @@ export function mount(root, params) {
   root.querySelectorAll('[data-cf]').forEach(b => b.addEventListener('click', () => { claimFilter = b.dataset.cf; refresh(); }));
   root.querySelectorAll('[data-act="entry-share"]').forEach(b => b.addEventListener('click', () => entryShareDialog()));
 
+  /* 年度設定頁：輸入先暫存喺瀏覽器，撳「儲存」先寫入（防呆） */
+  if (tab === 'settings') {
+    bindDraftAutosave(root, 'fin-settings', load().unitCode);
+    const rec = readDraft('fin-settings', load().unitCode);
+    if (rec) applyDraft(root, 'fin-settings', load().unitCode);
+    root.querySelector('[data-act="use-ref-opening"]')?.addEventListener('click', () => {
+      const ref = Number(load().reference?.openingBalance || 0);
+      if (!ref) { toast('舊帳冇期初結餘', 'err'); return; }
+      const el = root.querySelector('#set-open');
+      if (el) el.value = String(ref);
+      saveDraft('fin-settings', load().unitCode, collectSettings(root));
+      toast(`已填入 ${money(ref)}（撳「儲存」生效）`, 'ok');
+    });
+  }
+
   const sel = {
     month: root.querySelector('#fMonth'), type: root.querySelector('#fType'),
     cat: root.querySelector('#fCat'), kw: root.querySelector('#fKw'),
@@ -1110,6 +1226,23 @@ export function mount(root, params) {
       if (b.dataset.id) { update('transactions', b.dataset.id, patch); toast('已更新帳目', 'ok'); }
       else { add('transactions', { id: uid('t'), ...patch, createdBy: current()?.username || 'super' }); toast('已新增帳目', 'ok'); }
       go('#/finance');
+    }
+
+    if (act === 'save-settings-page') {
+      const patch = collectSettings(root);
+      if (patch.openingBalance < 0) {
+        if (!(await confirmDlg({
+          title: '期初結餘係負數？', okText: '確定用負數',
+          message: `你填咗 <b>${money(patch.openingBalance)}</b> 做期初結餘。如果旅團本身有底數，通常應該填正數（上年度結餘）。`
+        }))) return;
+      }
+      const db = load();
+      db.settings = { ...db.settings, ...patch };
+      commit();
+      clearDraft('fin-settings', load().unitCode);
+      toast('已儲存年度設定', 'ok');
+      refresh();
+      return;
     }
 
     if (act === 'settings') {

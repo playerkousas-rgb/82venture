@@ -11,6 +11,7 @@ import { JSDOM } from 'jsdom';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import vm from 'vm';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const MODE = process.argv[2] === 'mock' ? 'mock' : 'real';
@@ -221,7 +222,8 @@ const pages = ['#/dashboard', '#/meetings', '#/finance', '#/finance/reports', '#
   '#/notices', '#/notices/new', '#/tables', '#/tables/transactions', '#/tables/invItems',
   '#/tables/notices', '#/tables/source', '#/tables/sync', '#/tables/data',
   '#/admin', '#/admin/perms', '#/admin/unit',
-  '#/admin/data', '#/admin/audit', '#/admin/mock'];
+  '#/admin/data', '#/admin/audit', '#/admin/mock',
+  '#/links', '#/finance/settings', '#/members/new', '#/members/edit/' + store.load().members[0].id];
 for (const p of pages) {
   const before = errors.length;
   try {
@@ -914,6 +916,312 @@ section('快速記帳（影相＋選欄目）');
   // 設定檔：公開收集頁
   ok('unit.json 有 publicEntry 設定', !!store.load().settings?.publicEntry);
   ok('entry.html 存在（成員手機入口）', typeof fs.readFileSync === 'function' && fs.existsSync(path.join(ROOT, 'entry.html')));
+}
+
+/* ============================================================
+   新增測試（用戶提出嘅 8 項修正）
+   ============================================================ */
+
+/* ---------- 1. Code.gs 語法 ---------- */
+section('Code.gs（Apps Script 範本）');
+{
+  const { gasTemplate, gasGuide } = await import('../assets/js/lib/gastemplate.js');
+  const code = gasTemplate();
+  const lines = code.split('\n');
+  let syntaxError = '';
+  try { new vm.Script(code, { filename: 'Code.gs' }); }
+  catch (e) { syntaxError = e.message + ' @line ' + (e.stack || '').split('\n')[0]; }
+  ok('Code.gs 可以通過語法檢查（無 SyntaxError）', syntaxError === '', syntaxError);
+  ok('冇「字串入面斷行」（舊 bug：line 158 Invalid or unexpected token）',
+    !lines.some((l, i) => /^\'\)/.test(l.trim()) || /join\('$/.test(l)),
+    lines.map((l, i) => `${i + 1}:${l}`).filter(([, l]) => /join\('$/.test(l)).join('|'));
+  ok("links.join('\\n') 保留做跳行字串（唔係真換行）", code.includes("links.join('\\n')"));
+  ok('有定義 SHEET_TABS（舊版本用到但未定義）', /var SHEET_TABS = \[/.test(code));
+  ok('有 doPost / doGet / syncAll', ['function doPost', 'function doGet', 'function syncAll'].every(f => code.includes(f)));
+  ok('支援 action: ping / sync / claim / noticeSignup / loan',
+    ['ping', 'sync', 'claim', 'noticeSignup', 'loan'].every(a => code.includes(`'${a}'`)));
+  ok('有物資借用分頁寫入（appendLoan）', code.includes('function appendLoan') && code.includes("'物資借用'"));
+  ok('報名分頁有「出席與否」欄', code.includes("'出席與否'") && code.includes('function attendOf'));
+  ok('部署步驟說明有內容', gasGuide().split('\n').length >= 5);
+}
+
+/* ---------- 2. 用戶（領袖／執委／團員）可以編輯 ---------- */
+section('用戶名冊（可編輯 · 身份）');
+{
+  await auth.login('leader', 'leader', '8202');
+  window.location.hash = '#/members';
+  window.dispatchEvent(new window.HashChangeEvent('hashchange'));
+  await new Promise(r => setTimeout(r, 40));
+  const view = doc.getElementById('view');
+  ok('名冊頁標題係「用戶」', /用戶/.test(view.textContent), view.textContent.slice(0, 60));
+  ok('每一行有「編輯」掣（以前撳唔到）', view.querySelectorAll('[data-edit]').length >= 1,
+    String(view.querySelectorAll('[data-edit]').length));
+  ok('有身份篩選（領袖／執委／團員）', view.querySelectorAll('[data-ident]').length === 4);
+
+  const firstId = store.load().members[0].id;
+  view.querySelector('[data-edit]').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  await new Promise(r => setTimeout(r, 50));
+  ok('撳「編輯」會去編輯頁（#/members/edit/<id>）',
+    window.location.hash === '#/members/edit/' + firstId, window.location.hash);
+  ok('編輯頁有身份下拉（領袖／執委／團員）', !!doc.querySelector('#f-identity'));
+  ok('身份選項係 領袖／執委／團員',
+    Array.from(doc.querySelectorAll('#f-identity option')).map(o => o.value).join(',') === 'leader,exco,member',
+    Array.from(doc.querySelectorAll('#f-identity option')).map(o => o.value).join(','));
+
+  doc.querySelector('#f-name').value = '測試用戶甲';
+  doc.querySelector('#f-name').dispatchEvent(new window.Event('input', { bubbles: true }));
+  doc.querySelector('#f-identity').value = 'exco';
+  doc.querySelector('#f-identity').dispatchEvent(new window.Event('change', { bubbles: true }));
+  doc.querySelector('[data-act="save"]').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  await new Promise(r => setTimeout(r, 80));
+  const m = store.load().members.find(x => x.id === firstId);
+  ok('改資料可以儲存（以前儲存唔到）', m.name === '測試用戶甲', m.name);
+  ok('身份可以改成「執委」', m.identity === 'exco', m.identity);
+  ok('編輯完會返去個人頁', window.location.hash === '#/members/' + firstId, window.location.hash);
+
+  // 舊資料升級：冇 identity 欄 → 自動推算
+  const migrated = store.migrateIdentities({ members: [
+    { id: 'x1', name: '甲', role: '團長' }, { id: 'x2', name: '乙', role: '司庫' }, { id: 'x3', name: '丙', role: '' }
+  ] });
+  ok('舊資料自動推算身份（團長→領袖 / 司庫→執委 / 其他→團員）',
+    migrated === true, String(migrated));
+  const g = store.load();
+  ok('每個用戶都有身份欄', g.members.every(x => ['leader', 'exco', 'member'].includes(x.identity)),
+    JSON.stringify(g.members.filter(x => !x.identity).map(x => x.name)));
+  ok('執委都有權改用戶資料（以前只有領袖）',
+    (await (async () => { await auth.login('exco', 'exco', '8203'); return auth.can('member.edit'); })()) === true);
+  await auth.login('leader', 'leader', '8202');
+}
+
+/* ---------- 3. 防呆（先存瀏覽器，唔即時寫入） ---------- */
+section('防呆（暫存 → 確認 → 可還原）');
+{
+  const guard = await import('../assets/js/lib/guard.js');
+  guard.dropAllDrafts();
+  guard.saveDraft('member', 'm_test', { name: '暫存測試' });
+  ok('草稿可以暫存去瀏覽器', guard.readDraft('member', 'm_test')?.data?.name === '暫存測試');
+  ok('草稿存喺 localStorage（唔係資料庫）',
+    !!window.localStorage.getItem('venture82.drafts.v2')
+    && !store.load().members.some(m => m.name === '暫存測試'));
+  ok('可以列出所有暫存', guard.listDrafts().some(d => d.section === 'member'));
+  guard.clearDraft('member', 'm_test');
+  ok('儲存後可以清走暫存', guard.readDraft('member', 'm_test') === null);
+
+  // 編輯器輸入 → 自動暫存（未撳儲存唔會入資料庫）
+  window.location.hash = '#/members/new';
+  window.dispatchEvent(new window.HashChangeEvent('hashchange'));
+  await new Promise(r => setTimeout(r, 60));
+  const nameBox = doc.querySelector('#f-name');
+  ok('新增用戶頁有暫存提示位', !!doc.querySelector('[data-draft-stamp]'));
+  nameBox.value = '未儲存用戶';
+  nameBox.dispatchEvent(new window.Event('input', { bubbles: true }));
+  await new Promise(r => setTimeout(r, 900));
+  ok('輸入後自動暫存去瀏覽器', guard.readDraft('member', 'new')?.data?.name === '未儲存用戶',
+    JSON.stringify(guard.readDraft('member', 'new')));
+  ok('未撳「儲存」之前唔會寫入資料庫', !store.load().members.some(m => m.name === '未儲存用戶'));
+  guard.dropAllDrafts();
+
+  // 刪除要打字確認
+  window.location.hash = '#/members/' + firstId2();
+  function firstId2() { return store.load().members[1].id; }
+  window.dispatchEvent(new window.HashChangeEvent('hashchange'));
+  await new Promise(r => setTimeout(r, 50));
+  const target = store.load().members[1];
+  doc.querySelector('[data-act="del"]')?.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  await new Promise(r => setTimeout(r, 80));
+  const dlg = doc.querySelector('.overlay .modal');
+  ok('刪除會彈確認框', !!dlg);
+  const okBtn = dlg?.querySelector('.modal-foot [data-act="1"]');
+  ok('未打字之前「確定刪除」係停用（防手誤）', okBtn?.disabled === true);
+  const ti = dlg?.querySelector('#gd-text');
+  if (ti) { ti.value = target.name; ti.dispatchEvent(new window.Event('input', { bubbles: true })); }
+  await new Promise(r => setTimeout(r, 30));
+  ok('打低個名之後先可以確定', okBtn?.disabled === false);
+  dlg?.querySelector('[data-close-x]')?.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  await new Promise(r => setTimeout(r, 30));
+  ok('取消之後用戶仍然存在', !!store.load().members.find(m => m.id === target.id));
+
+  // 總表同步唔會即時寫入（只排隊）
+  const dbx = store.load();
+  dbx.sync = { ...(dbx.sync || {}), auto: true, pending: 0 };
+  store.commit();
+  ok('開咗「排隊」之後，改動只係累加待同步數（唔會自動送出）',
+    Number(store.load().sync.pending) >= 1, String(store.load().sync?.pending));
+  dbx.sync.auto = false; dbx.sync.pending = 0; store.commit();
+}
+
+/* ---------- 4. 通告：詳情頁 + 輸出（連回覆出席與否） ---------- */
+section('通告詳情（輸出連出席回覆）');
+{
+  const nv = await import('../assets/js/views/notices.js');
+  const n0 = store.add('notices', {
+    id: 'nt-test-attend', type: 'event', status: 'published', publishAt: '2026-09-15',
+    title: { zh: '測試通告（出席）', en: 'Test' }, body: { zh: '內容' },
+    needSignup: true, deadline: '2026-09-30', eventDate: '2026-10-17',
+    fields: [
+      { key: 'name', label: '姓名', type: 'text', required: true },
+      { key: 'contact', label: '聯絡電話', type: 'tel', required: false },
+      { key: 'attend', label: '出席與否', type: 'radio', options: ['出席', '唔出席（請假）'] }
+    ],
+    signups: []
+  });
+  const ms2 = store.load().members.filter(m => m.status !== 'alumni');
+  ok('出席判斷：出席', nv.attendValue({ values: { attend: '出席' } }) === 'yes');
+  ok('出席判斷：唔出席（請假）', nv.attendValue({ values: { attend: '唔出席（請假）' } }) === 'no');
+  ok('出席判斷：未填 = 未回覆', nv.attendValue({ values: {} }) === '');
+
+  nv.markAttendance(store.find('notices', n0.id), ms2[0], 'yes');
+  nv.markAttendance(store.find('notices', n0.id), ms2[1], 'no');
+  const A = nv.attendanceSummary(store.find('notices', n0.id));
+  ok('統計出席 1 位', A.yes === 1, JSON.stringify(A));
+  ok('統計唔出席 1 位', A.no === 1, JSON.stringify(A));
+  ok('其餘計做未回覆', A.none === A.rosterCount - 2, JSON.stringify(A));
+  const rows = nv.attendanceRows(store.find('notices', n0.id));
+  ok('出席表以名冊為本（每位非舊團員一行）', rows.roster.length === ms2.length, `${rows.roster.length}/${ms2.length}`);
+
+  window.location.hash = '#/notices/nt-test-attend';
+  window.dispatchEvent(new window.HashChangeEvent('hashchange'));
+  await new Promise(r => setTimeout(r, 60));
+  const v2 = doc.getElementById('view');
+  ok('通告詳情有文件式排版（同團章一樣）', !!v2.querySelector('#noticeSheet'));
+  ok('右面有「輸出同分享」面板', /輸出同分享/.test(v2.textContent));
+  ok('有「通告＋出席回覆（Word）」輸出掣', !!v2.querySelector('[data-act="export-full-word"]'));
+  ok('有「通告＋出席回覆（PDF）」輸出掣', !!v2.querySelector('[data-act="export-full-pdf"]'));
+  ok('有「出席回覆表（CSV）」輸出掣', !!v2.querySelector('[data-act="export-attend"]'));
+  ok('詳情頁列出每位用戶嘅回覆', v2.querySelectorAll('[data-attend]').length >= 2,
+    String(v2.querySelectorAll('[data-attend]').length));
+  ok('舊通告可以補「出席與否」欄', (() => {
+    const bare = store.add('notices', { id: 'nt-bare', status: 'published', title: { zh: '舊通告' }, needSignup: true, fields: [{ key: 'name', label: '姓名', type: 'text' }], signups: [] });
+    const up = nv.ensureAttendField(store.find('notices', bare.id));
+    return (up.fields || []).some(f => f.key === 'attend');
+  })());
+  store.remove('notices', 'nt-test-attend');
+  store.remove('notices', 'nt-bare');
+}
+
+/* ---------- 5. 旅團選擇閘 ---------- */
+section('旅團選擇閘（先揀旅團再登入）');
+{
+  ok('網址有 ?u= 時直接入登入畫面（唔會見到旅團閘）',
+    !/揀你嘅旅團/.test(doc.body.textContent));
+  ok('index.html 有載入 main.js（旅團閘喺 main.js）',
+    fs.readFileSync(path.join(ROOT, 'index.html'), 'utf8').includes('assets/js/main.js'));
+  const mainSrc = fs.readFileSync(path.join(ROOT, 'assets/js/main.js'), 'utf8');
+  ok('main.js 先顯示旅團閘，之後先 init + 登入',
+    /if \(!unitChosen\(\)\) return renderUnitGate\(\);/.test(mainSrc)
+    && mainSrc.indexOf('renderUnitGate();') < mainSrc.indexOf('await init();'));
+  ok('旅團閘有 MOCK 選項', /data-pick="MOCK"/.test(mainSrc));
+  ok('登入頁有「更換旅團」掣', /btnGate/.test(mainSrc));
+}
+
+/* ---------- 6. 成員連結（申報 / 物資 / 通告報名） ---------- */
+section('成員連結（免登入公開頁）');
+{
+  const links = model.memberLinks();
+  const ids = links.map(l => l.id);
+  ok('有收支申報連結（entry.html）', ids.includes('entry'));
+  ok('有物資借用連結（borrow.html）', ids.includes('borrow'));
+  ok('有團章連結（constitution.html）', ids.includes('constitution'));
+  ok('每條連結都帶旅團編號', links.every(l => /u=(0082|MOCK)/.test(l.url)), links.map(l => l.url).join(' | '));
+  ok('borrow.html 存在', fs.existsSync(path.join(ROOT, 'borrow.html')));
+  ok('public-borrow.js 存在', fs.existsSync(path.join(ROOT, 'assets/js/public-borrow.js')));
+
+  window.location.hash = '#/links';
+  window.dispatchEvent(new window.HashChangeEvent('hashchange'));
+  await new Promise(r => setTimeout(r, 60));
+  const v3 = doc.getElementById('view');
+  ok('「成員連結」頁可以渲染', (v3.innerHTML || '').length > 400, String((v3.innerHTML || '').length));
+  ok('頁上有 QR 掣', v3.querySelectorAll('[data-qr]').length >= 3, String(v3.querySelectorAll('[data-qr]').length));
+  ok('頁上有列印海報掣', v3.querySelectorAll('[data-poster]').length >= 3);
+  ok('側邊欄有「成員連結」', /成員連結/.test(doc.querySelector('.sidebar')?.textContent || ''));
+  if (MODE === 'real') {
+    ok('物資借用送出網址已設定（borrow.html → 總表）',
+      /\/exec$/.test(store.load().settings?.publicBorrow?.submitUrl || ''),
+      store.load().settings?.publicBorrow?.submitUrl);
+  }
+}
+
+/* ---------- 7. 進度追蹤就緒檢查 ---------- */
+section('進度追蹤（連通檢查）');
+{
+  const pv = await import('../assets/js/views/progress.js');
+  const R = pv.readiness();
+  ok('就緒清單有 8 項', R.total === 8, String(R.total));
+  if (MODE === 'real') {
+    ok('真實旅團已預備好連通進度系統', R.ready === true,
+      R.checks.filter(c => !c.ok).map(c => c.label).join(' / '));
+    ok('進度系統網址係 Apps Script /exec', /\/exec$/.test(store.load().profile?.progress?.url || ''),
+      store.load().profile?.progress?.url);
+    ok('Portal 模式帶 u=0082 同 role', R.url.includes('u=0082') && R.url.includes('role=exec_committee'), R.url);
+    ok('Portal 連結有 from=portal（免密碼）', R.url.includes('from=portal'), R.url);
+  } else {
+    ok('示範模式都有自己嘅進度系統設定（示範用）', R.ready === true,
+      R.checks.filter(c => !c.ok).map(c => c.label).join(' / '));
+    ok('示範模式帶 u=MOCK（唔會用真實旅團編號）', R.url.includes('u=MOCK'), R.url);
+    ok('示範模式嘅後端唔會送出街（只有進度連結）', !store.load().backend);
+  }
+  window.location.hash = '#/progress';
+  window.dispatchEvent(new window.HashChangeEvent('hashchange'));
+  await new Promise(r => setTimeout(r, 60));
+  const v4 = doc.getElementById('view');
+  ok('進度頁有就緒清單', /連通進度追蹤/.test(v4.textContent));
+  ok('進度頁有「檢查連線（實測）」掣', !!v4.querySelector('[data-act="check"]'));
+  ok('checkConnection 係一支可以用嘅函式', typeof pv.checkConnection === 'function');
+}
+
+/* ---------- 8. 首頁帳目：現在結餘（含期初） ---------- */
+section('首頁帳目（現在結餘 · 期初結餘）');
+{
+  const db3 = store.load();
+  const keepOpen = db3.settings.openingBalance;
+  const keepTx = JSON.parse(JSON.stringify(db3.transactions));
+  db3.settings.openingBalance = 8803.28;
+  db3.transactions = [
+    { id: 'tx1', date: '2026-09-01', type: 'income', amount: 1000, item: '團費' },
+    { id: 'tx2', date: '2026-09-02', type: 'expense', amount: 2500, item: '露營' }
+  ];
+  store.commit();
+  ok('現在結餘 = 期初 + 收入 − 支出',
+    Math.round(model.currentBalance() * 100) / 100 === 7303.28, String(model.currentBalance()));
+  ok('唔會再淨係顯示收入減支出（舊做法會出現 −1500）',
+    model.balance(db3.transactions) === -1500 && model.currentBalance() > 0,
+    `balance=${model.balance(db3.transactions)} current=${model.currentBalance()}`);
+  const bd = model.balanceBreakdown();
+  ok('結餘拆解有期初／收入／支出／現在',
+    bd.opening === 8803.28 && bd.income === 1000 && bd.expense === 2500 && Math.round(bd.now * 100) / 100 === 7303.28,
+    JSON.stringify(bd));
+
+  window.location.hash = '#/dashboard';
+  window.dispatchEvent(new window.HashChangeEvent('hashchange'));
+  await new Promise(r => setTimeout(r, 60));
+  const dash = doc.getElementById('view');
+  ok('儀表板顯示「現在結餘」', /現在結餘/.test(dash.textContent));
+  ok('儀表板有帳目流程卡（期初＋收入−支出＝現在）', !!dash.querySelector('.bal-flow'));
+  ok('儀表板顯示期初結餘數字', dash.textContent.includes('8,803.28') || dash.textContent.includes('8803.28'),
+    dash.textContent.replace(/\s+/g, ' ').slice(0, 200));
+  ok('儀表板唔會顯示負數結餘', !/HK\$\s?-/.test(dash.querySelector('.bal-cell.now')?.textContent || ''),
+    dash.querySelector('.bal-cell.now')?.textContent);
+
+  // 負數時要有解釋
+  db3.settings.openingBalance = 0;
+  store.commit();
+  window.dispatchEvent(new window.HashChangeEvent('hashchange'));
+  await new Promise(r => setTimeout(r, 60));
+  ok('結餘係負數時會解釋原因（期初未填）',
+    /點解會見到負數/.test(doc.getElementById('view').textContent));
+  ok('負數提示有「改期初結餘」捷徑',
+    !!doc.querySelector('[data-go="#/finance/settings"]'));
+
+  db3.settings.openingBalance = keepOpen;
+  db3.transactions = keepTx;
+  store.commit();
+
+  window.location.hash = '#/finance/settings';
+  window.dispatchEvent(new window.HashChangeEvent('hashchange'));
+  await new Promise(r => setTimeout(r, 60));
+  const fv = doc.getElementById('view');
+  ok('財務有「年度設定」分頁（改期初結餘）', !!fv.querySelector('#set-open'));
+  ok('年度設定頁顯示結餘點計', /現在結餘/.test(fv.textContent));
 }
 
 /* ---------- 總結 ---------- */

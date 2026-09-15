@@ -27,20 +27,22 @@ import * as accountsView from './views/accounts.js';
 import * as docs from './views/docs.js';
 import * as noticesView from './views/notices.js';
 import * as tables from './views/tables.js';
+import * as linksView from './views/links.js';
 
 const VIEWS = {
   dashboard, meetings, finance, members, inventory, progress,
-  constitution, notices: noticesView, tables, admin: accountsView, docs
+  constitution, notices: noticesView, tables, admin: accountsView, docs, links: linksView
 };
 
 const NAV = [
   { id: 'dashboard', label: '儀表板', icon: 'home' },
   { id: 'meetings', label: '會議', icon: 'calendar', badge: () => pendingMeetings().length },
   { id: 'finance', label: '財務', icon: 'wallet', badge: () => overdueFees().length + pendingClaims().length },
-  { id: 'members', label: '團員', icon: 'users' },
+  { id: 'members', label: '用戶', icon: 'users' },
   { id: 'inventory', label: '物資', icon: 'grid', badge: () => pendingLoans().length },
   { id: 'progress', label: '進度', icon: 'chart' },
   { id: 'notices', label: '通告', icon: 'megaphone', badge: () => (load()?.notices || []).filter(n => n.status === 'published').length },
+  { id: 'links', label: '成員連結', icon: 'share' },
   { id: 'constitution', label: '團章', icon: 'book' },
   { id: 'tables', label: '表格', icon: 'table' },
   { id: 'docs', label: '教學', icon: 'note' },
@@ -58,6 +60,8 @@ async function boot() {
   app.innerHTML = loadingScreen();
   try {
     await loadRegistry();
+    /* 第一步：先揀旅團（或者 MOCK），揀完先出現登入畫面 */
+    if (!unitChosen()) return renderUnitGate();
     await init();
     applyTheme(load()?.unit?.theme);
   } catch (e) {
@@ -71,6 +75,81 @@ async function boot() {
   if (isMock() && !current()) loginAsMock('leader');
   if (!current()) renderLogin();
   else render();
+}
+
+/* ============================================================
+   旅團選擇閘（登入之前）
+   網址有 ?u= / ?mock=1，或者之前已經揀過，就直接入登入畫面。
+   ============================================================ */
+const CHOSEN_KEY = 'venture82.unitChosen.v2';
+function unitChosen() {
+  const url = new URLSearchParams(location.search);
+  if (url.get('u') || url.get('mock') === '1') return true;
+  try { return !!localStorage.getItem(CHOSEN_KEY); } catch { return false; }
+}
+function markChosen(code) {
+  try { localStorage.setItem(CHOSEN_KEY, code); } catch { /* ignore */ }
+}
+function forgetChoice() {
+  try { localStorage.removeItem(CHOSEN_KEY); } catch { /* ignore */ }
+  const u = new URL(location.href);
+  u.searchParams.delete('u');
+  u.searchParams.delete('mock');
+  location.href = u.toString();
+}
+
+function renderUnitGate() {
+  document.body.classList.add('login-body');
+  const units = unitList();
+  app.innerHTML = `
+  <div class="gate-wrap">
+    <div class="gate-card">
+      <div class="gate-brand">
+        <div class="logo">82</div>
+        <div>
+          <div class="gate-title">82venture · 執委會管理平台</div>
+          <div class="gate-sub">第一步：揀你嘅旅團（或者用示範資料試玩）</div>
+        </div>
+      </div>
+
+      <div class="gate-list">
+        ${units.map(x => `
+          <button class="gate-unit" data-pick="${esc(x.code)}">
+            <span class="code">${esc(x.code)}</span>
+            <span class="grow">
+              <span class="semibold" style="display:block">${esc(x.name || '')}</span>
+              <span class="xs faint">${esc(x.nameEn || x.section || '')}${x.local ? ' · 本地旅團' : ''}</span>
+            </span>
+            ${icon('chevronR', 17)}
+          </button>`).join('') || `
+          <div class="note-box warn">${icon('alert', 15)}<div>讀唔到 <code>data/units.json</code> —— 請用 HTTP 伺服器開啟呢個網站（唔好直接雙擊 HTML）。</div></div>`}
+
+        <button class="gate-unit mock" data-pick="MOCK">
+          <span class="code">MOCK</span>
+          <span class="grow">
+            <span class="semibold" style="display:block">試用示範（MOCK）</span>
+            <span class="xs faint">假資料，同真實資料完全隔離，隨便試都唔會影響真數據</span>
+          </span>
+          ${icon('chevronR', 17)}
+        </button>
+      </div>
+
+      <div class="gate-foot">
+        揀完之後先會出現<b>登入畫面</b>（領袖 / 執行委員會）。<br>
+        想加多一個旅團？喺 <code>data/units.json</code> 註冊，再 copy 一個 <code>data/units/&lt;編號&gt;/</code> 資料夾（詳見 docs/ADD_NEW_UNIT.md）。
+      </div>
+    </div>
+  </div>`;
+
+  app.querySelectorAll('[data-pick]').forEach(b => b.addEventListener('click', () => {
+    const code = b.dataset.pick;
+    markChosen(code);
+    const u = new URL(location.href);
+    if (code === 'MOCK') { u.searchParams.set('mock', '1'); u.searchParams.set('u', 'MOCK'); }
+    else { u.searchParams.set('u', code); u.searchParams.delete('mock'); }
+    u.hash = '';
+    location.href = u.toString();
+  }));
 }
 
 function loadingScreen() {
@@ -175,6 +254,13 @@ function renderLogin() {
           <div class="hint mt-8">示範模式用假資料，同真實資料完全分開，隨便試都唔會影響真數據。</div>
         </div>
 
+        <div class="mt-16" style="border-top:1px solid var(--line-2);padding-top:12px">
+          <div class="row-between wrap gap-8">
+            <div class="xs faint">而家嘅旅團：<b class="mono">${esc(code)}</b>${isMock() ? '（示範模式）' : ''}</div>
+            <button class="btn btn-xs" id="btnGate">${icon('refresh', 13)} 更換旅團 / 示範</button>
+          </div>
+        </div>
+
         ${showDefaultHint ? `
         <div class="demo-hint mt-16">
           <b>首次使用（預設帳戶）</b><br>
@@ -204,6 +290,7 @@ function renderLogin() {
   });
 
   app.querySelector('#btnMock')?.addEventListener('click', () => enterMock());
+  app.querySelector('#btnGate')?.addEventListener('click', () => forgetChoice());
 
   app.querySelector('#loginForm').addEventListener('submit', async e => {
     e.preventDefault();

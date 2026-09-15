@@ -71,13 +71,13 @@ export const PERMS = {
   'fee.mark':       { super: 1, leader: 1, exco: 1 },
   'fee.edit':       { super: 1, leader: 1, exco: 0 },
 
-  /* 團員 */
+  /* 用戶（領袖 / 執委 / 團員 名冊）—— 執委都可以改資料同身份 */
   'member.view':    { super: 1, leader: 1, exco: 1 },
-  'member.create':  { super: 1, leader: 1, exco: 0 },
-  'member.edit':    { super: 1, leader: 1, exco: 0 },
+  'member.create':  { super: 1, leader: 1, exco: 1 },
+  'member.edit':    { super: 1, leader: 1, exco: 1 },
   'member.note':    { super: 1, leader: 1, exco: 1 },
   'member.delete':  { super: 1, leader: 1, exco: 0 },
-  'member.export':  { super: 1, leader: 1, exco: 0 },
+  'member.export':  { super: 1, leader: 1, exco: 1 },
 
   /* 物資（能登入嘅都可以批核／借還） */
   'inv.view':       { super: 1, leader: 1, exco: 1 },
@@ -123,7 +123,7 @@ export const PERM_GROUPS = [
   { title: '會議', items: [['meeting.view', '查看會議'], ['meeting.create', '新增會議'], ['meeting.edit', '編輯會議'], ['meeting.delete', '刪除會議'], ['meeting.minutes', '記錄 / 點名'], ['meeting.approve', '確認 / 通過']] },
   { title: '財務', items: [['finance.view', '查看帳目'], ['finance.create', '新增收支'], ['finance.edit', '編輯收支'], ['finance.delete', '刪除收支'], ['finance.report', '年結 / 月結報表'], ['finance.export', '輸出 Word / PDF / CSV'], ['claim.submit', '提交收支申報'], ['claim.review', '批核申報']] },
   { title: '團費', items: [['fee.view', '查看收費'], ['fee.mark', '標記收款'], ['fee.edit', '增刪收費項目']] },
-  { title: '團員', items: [['member.view', '查看團員'], ['member.create', '新增團員'], ['member.edit', '編輯資料 / 生日'], ['member.note', '撰寫備註'], ['member.delete', '刪除團員'], ['member.export', '輸出團員及生日表']] },
+  { title: '用戶（領袖／執委／團員）', items: [['member.view', '查看用戶名冊'], ['member.create', '新增用戶'], ['member.edit', '編輯資料 / 身份 / 生日'], ['member.note', '撰寫備註'], ['member.delete', '刪除用戶'], ['member.export', '輸出名冊及生日表']] },
   { title: '物資', items: [['inv.view', '查看物資'], ['inv.manage', '新增 / 修改物資'], ['inv.borrow', '申請借用'], ['inv.approve', '批核借用 / 歸還'], ['inv.audit', '盤點調整庫存']] },
   { title: '通告', items: [['notice.view', '查看通告'], ['notice.create', '開新通告'], ['notice.edit', '編輯通告'], ['notice.publish', '發布 / 分享'], ['notice.signup', '睇報名紀錄']] },
   { title: '表格與同步', items: [['table.view', '查看表格設計'], ['table.design', '改欄位 / 加欄位'], ['table.sync', '設定總表同步']] },

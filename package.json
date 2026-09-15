@@ -6,10 +6,11 @@
   "type": "module",
   "scripts": {
     "serve": "python3 -m http.server 8000",
-    "test": "node tests/smoke.mjs real && node tests/smoke.mjs mock && node tests/public.mjs",
+    "test": "node tests/smoke.mjs real && node tests/smoke.mjs mock && node tests/public.mjs && node tests/gate.mjs",
     "test:real": "node tests/smoke.mjs real",
     "test:mock": "node tests/smoke.mjs mock",
-    "test:public": "node tests/public.mjs"
+    "test:public": "node tests/public.mjs",
+    "test:gate": "node tests/gate.mjs"
   },
   "devDependencies": {
     "jsdom": "^26.0.0"

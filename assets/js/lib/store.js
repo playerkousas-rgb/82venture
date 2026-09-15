@@ -68,6 +68,24 @@ function lsDel(key) {
   try { localStorage.removeItem(key); } catch { delete memoryStore[key]; }
 }
 
+/* ---------------- 升級：用戶身份（領袖 / 執委 / 團員） ----------------
+   舊資料庫嘅團員紀錄冇 identity 欄。呢度由職位／標籤推算一次，
+   之後喺「用戶」頁可以隨時改。回傳 true = 有改動（要 persist）。 */
+const IDENTITY_KEYS = ['leader', 'exco', 'member'];
+export function migrateIdentities(db) {
+  if (!db || !Array.isArray(db.members)) return false;
+  let changed = false;
+  db.members.forEach(m => {
+    if (IDENTITY_KEYS.includes(m.identity)) return;
+    const t = `${m.role || ''} ${(m.tags || []).join(' ')}`.toLowerCase();
+    m.identity = /(團長|領袖|leader|scouter)/.test(t) ? 'leader'
+      : /(執委|執行委員會|exco|committee|主席|司庫|文書)/.test(t) ? 'exco'
+        : 'member';
+    changed = true;
+  });
+  return changed;
+}
+
 /* ---------------- 種子資料 ---------------- */
 function blankDb(mode, code, entry = {}) {
   return {
@@ -179,6 +197,7 @@ function seedBackend(db, mode, code) {
   db.settings = { ...s };
   db.settings.notice = { ...(s.notice || {}), submitUrl: s.notice?.submitUrl || url };
   db.settings.publicEntry = { ...(s.publicEntry || {}), submitUrl: s.publicEntry?.submitUrl || url };
+  db.settings.publicBorrow = { ...(s.publicBorrow || {}), submitUrl: s.publicBorrow?.submitUrl || url };
 }
 
 /* ---------------- 初始化 ---------------- */
@@ -211,11 +230,13 @@ export async function init(opts = {}) {
     state.db.accounts = state.mode === 'mock' ? SEED_ACCOUNTS_MOCK : SEED_ACCOUNTS;
     persist();
   }
+  // 用戶名冊升級：舊資料冇「身份」欄 → 由職位／標籤推算（領袖 / 執委 / 團員）
+  if (migrateIdentities(state.db)) persist();
   // 後端設定升級：舊資料庫（未有 sync 設定）自動補上 Registry / unit.json 嘅 Apps Script 網址
   if (state.mode === 'real') {
-    const before = JSON.stringify([state.db.sync?.url || '', state.db.settings?.notice?.submitUrl || '', state.db.settings?.publicEntry?.submitUrl || '']);
+    const before = JSON.stringify([state.db.sync?.url || '', state.db.settings?.notice?.submitUrl || '', state.db.settings?.publicEntry?.submitUrl || '', state.db.settings?.publicBorrow?.submitUrl || '']);
     if (state.db.sync?.url !== undefined || !state.db.backend) seedBackend(state.db, state.mode, code);
-    const after = JSON.stringify([state.db.sync?.url || '', state.db.settings?.notice?.submitUrl || '', state.db.settings?.publicEntry?.submitUrl || '']);
+    const after = JSON.stringify([state.db.sync?.url || '', state.db.settings?.notice?.submitUrl || '', state.db.settings?.publicEntry?.submitUrl || '', state.db.settings?.publicBorrow?.submitUrl || '']);
     if (before !== after) persist();
   }
   lsSet(K.unit, code);
@@ -267,6 +288,11 @@ function persist() {
   state.db.meta = state.db.meta || {};
   state.db.meta.updatedAt = nowStamp();
   lsSet(dbKey(state.mode, state.unitCode), JSON.stringify(state.db));
+  /* 防呆：改動只會「排隊」等送去總表，永遠唔會即時自動送出。
+     要去「表格與同步 → 總表同步 → 立即同步」先真正寫入 Apps Script。 */
+  if (state.db.sync && state.db.sync.auto) {
+    state.db.sync.pending = Number(state.db.sync.pending || 0) + 1;
+  }
 }
 
 export function commit() { persist(); return state.db; }

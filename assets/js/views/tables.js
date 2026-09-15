@@ -56,11 +56,24 @@ export const DEFAULT_TABLES = {
       { key: 'photos', label: '相片', type: 'photos', show: false }
     ]
   },
+  invLoans: {
+    label: '物資借用', icon: 'clock', collection: 'invLoans',
+    fields: [
+      { key: 'borrowerName', label: '借用人', type: 'text', required: true, core: true, show: true },
+      { key: 'itemName', label: '物資', type: 'text', core: true, show: true },
+      { key: 'qty', label: '數量', type: 'number', show: true },
+      { key: 'outDate', label: '借用日', type: 'date', show: true },
+      { key: 'dueDate', label: '應還日', type: 'date', show: true },
+      { key: 'status', label: '狀態', type: 'select', options: ['requested', 'approved', 'out', 'returned', 'rejected', 'cancelled'], optionLabels: ['待批核', '已批核', '借出中', '已歸還', '已拒絕', '已取消'], show: true },
+      { key: 'note', label: '備註', type: 'textarea', show: false }
+    ]
+  },
   members: {
-    label: '團員', icon: 'users', collection: 'members',
+    label: '用戶（領袖／執委／團員）', icon: 'users', collection: 'members',
     fields: [
       { key: 'name', label: '姓名', type: 'text', required: true, core: true, show: true },
       { key: 'eng', label: '英文名', type: 'text', show: false },
+      { key: 'identity', label: '身份', type: 'select', options: ['leader', 'exco', 'member'], optionLabels: ['領袖', '執委', '團員'], core: true, show: true },
       { key: 'birthday', label: '出生日期', type: 'date', core: true, show: true },
       { key: 'role', label: '職位', type: 'text', show: true },
       { key: 'status', label: '狀態', type: 'select', options: ['active', 'inactive', 'alumni'], optionLabels: ['現役', '休假', '舊團員'], show: true },
@@ -384,7 +397,8 @@ function syncView() {
           <div class="field"><label class="label">API Key（可留空）</label>
             <input class="input" id="y-key" value="${esc(s.apiKey || '')}" placeholder="範本預設 v82-demo-key"></div>
         </div>
-        <label class="check mt-12"><input type="checkbox" id="y-auto" ${s.auto ? 'checked' : ''}> 每次改動後自動同步（背景送出）</label>
+        <label class="check mt-12"><input type="checkbox" id="y-auto" ${s.auto ? 'checked' : ''}> 改動後<b>排隊</b>等同步（防呆：唔會即時送出，要撳「立即同步」先寫入總表）</label>
+        ${Number(s.pending) ? `<div class="hint" style="color:var(--warn)">有 <b>${Number(s.pending)}</b> 次改動仲未送去總表。</div>` : ''}
         <label class="check mt-6"><input type="checkbox" id="y-share" ${(load().settings?.publicEntry?.submitUrl || load().settings?.notice?.submitUrl) === s.url ? 'checked' : ''}> <b>同一條網址共用</b>畀「手機記帳」同「通告報名」</label>
         <div class="row gap-8 mt-12 wrap">
           <button class="btn btn-primary" data-act="save-sync">${icon('save', 16)} 儲存設定</button>
@@ -629,6 +643,7 @@ export async function pushToMaster({ silent = false } = {}) {
     });
     const txt = (await res.text()).slice(0, 300);
     const ok = res.ok;
+    if (ok) { const d = load(); d.sync = { ...(d.sync || {}), pending: 0 }; }
     log(`${ok ? '✓' : '✗'} HTTP ${res.status} · ${payload.counts ? Object.values(payload.counts).reduce((a, b) => a + b, 0) : 0} 筆 · ${txt.replace(/\s+/g, ' ').slice(0, 80)}`);
     if (!silent) toast(ok ? '已同步到總表' : '同步失敗（' + res.status + '）', ok ? 'ok' : 'err');
     return { ok, msg: txt };
